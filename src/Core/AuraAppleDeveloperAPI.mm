@@ -392,7 +392,9 @@ static const char *kRFC5054_2048_N_Hex =
 
         // 生成 32 字节客户端随机数 a，并计算 A = (g ^ a) mod N
         unsigned char a_bytes[32];
-        SecRandomCopyBytes(kSecRandomDefault, 32, a_bytes);
+        if (SecRandomCopyBytes(kSecRandomDefault, 32, a_bytes) != 0) {
+            arc4random_buf(a_bytes, 32);
+        }
         BIGNUM *bn_a = bin2bn(a_bytes, 32, NULL);
         BIGNUM *bn_A = bn_new();
         mod_exp(bn_A, bn_g, bn_a, bn_N, bnCtx);
@@ -454,9 +456,10 @@ static const char *kRFC5054_2048_N_Hex =
             pbkdfPassInput = [hexPass dataUsingEncoding:NSUTF8StringEncoding];
         }
         unsigned char pbkdfOut[32];
-        CCKeyDerivationPBKDF(kCCPBKDF2, (const char *)pbkdfPassInput.bytes, pbkdfPassInput.length,
+        int pbkdfRet = CCKeyDerivationPBKDF(kCCPBKDF2, (const char *)pbkdfPassInput.bytes, pbkdfPassInput.length,
                              (const uint8_t *)salt.bytes, salt.length,
                              kCCPRFHmacAlgSHA256, (uint)iterations, pbkdfOut, 32);
+        (void)pbkdfRet;
 
         NSMutableData *xInput = [NSMutableData dataWithData:salt];
         [xInput appendBytes:pbkdfOut length:32];

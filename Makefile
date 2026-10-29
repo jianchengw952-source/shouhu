@@ -19,7 +19,7 @@ AuraSignPro_INSTALL_PATH = /Applications
 AuraSignPro_FRAMEWORKS = UIKit Foundation Security CoreGraphics QuartzCore SystemConfiguration UniformTypeIdentifiers
 AuraSignPro_LIBRARIES = z sqlite3
 AuraSignPro_CODESIGN_FLAGS = -Sentitlements.xml
-AuraSignPro_CFLAGS = -fobjc-arc -Isrc/Core -Isrc/App -Wno-deprecated-declarations
+AuraSignPro_CFLAGS = -fobjc-arc -Isrc/Core -Isrc/App -Wno-deprecated-declarations -Wno-unused-result
 
 # 2. 系统级后台守护进程 aurasignd
 TOOL_NAME = aurasignd
@@ -27,14 +27,14 @@ aurasignd_FILES = src/Daemon/aurasignd.mm src/Core/AuraSignEngine.mm src/Core/Au
 aurasignd_FRAMEWORKS = Foundation UIKit CoreGraphics Security SystemConfiguration
 aurasignd_LIBRARIES = z sqlite3
 aurasignd_CODESIGN_FLAGS = -Sentitlements.xml
-aurasignd_CFLAGS = -fobjc-arc -Isrc/Core -Wno-deprecated-declarations
+aurasignd_CFLAGS = -fobjc-arc -Isrc/Core -Wno-deprecated-declarations -Wno-unused-result
 aurasignd_INSTALL_PATH = /usr/bin
 
 # 3. 关机掉签强拦截与越狱工具内嵌液态胶囊插件 AuraSignShield.dylib
 TWEAK_NAME = AuraSignShield
 AuraSignShield_FILES = src/Tweak/AuraSignShield.x src/App/AuraLiquidGlassView.mm src/Core/AuraSignEngine.mm src/Core/AuraAppleDeveloperAPI.mm
 AuraSignShield_FRAMEWORKS = UIKit Foundation QuartzCore CoreGraphics Security
-AuraSignShield_CFLAGS = -fobjc-arc -Isrc/Core -Isrc/App -Wno-deprecated-declarations
+AuraSignShield_CFLAGS = -fobjc-arc -Isrc/Core -Isrc/App -Wno-deprecated-declarations -Wno-unused-result
 
 include $(THEOS_MAKE_PATH)/application.mk
 include $(THEOS_MAKE_PATH)/tool.mk
