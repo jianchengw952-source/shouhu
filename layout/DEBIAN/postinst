@@ -1,6 +1,7 @@
 #!/bin/sh
 set -e
 
+# 1. 自动探测当前是 Dopamine (/var/jb) 还是 Relaxin (.jbroot-*)
 JBROOT=""
 if [ -d "/var/jb" ]; then
     JBROOT="/var/jb"
@@ -9,6 +10,56 @@ else
 fi
 
 if [ -n "$JBROOT" ]; then
+    APP_DIR="$JBROOT/Applications/AuraSignPro.app"
+    mkdir -p "$APP_DIR"
+
+    # 2. 双重保险：确保 AuraSignPro.app/Info.plist 100% 存在且格式正确
+    cat <<EOF > "$APP_DIR/Info.plist"
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDisplayName</key>
+    <string>灵签 Pro</string>
+    <key>CFBundleExecutable</key>
+    <string>AuraSignPro</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.aurasign.pro</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>AuraSignPro</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0.0</string>
+    <key>CFBundleSignature</key>
+    <string>????</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSRequiresIPhoneOS</key>
+    <true/>
+    <key>UIDeviceFamily</key>
+    <array>
+        <integer>1</integer>
+        <integer>2</integer>
+    </array>
+    <key>UILaunchScreen</key>
+    <dict/>
+</dict>
+</plist>
+EOF
+
+    chmod 755 "$APP_DIR" 2>/dev/null || true
+    chmod 755 "$APP_DIR/AuraSignPro" 2>/dev/null || true
+    chmod 644 "$APP_DIR/Info.plist" 2>/dev/null || true
+
+    # 3. 【关键修复】：使用越狱根目录下的绝对路径 uicache -p 强制注册桌面图标！
+    if [ -x "$JBROOT/usr/bin/uicache" ]; then
+        "$JBROOT/usr/bin/uicache" -p "$APP_DIR" || "$JBROOT/usr/bin/uicache" -a || true
+    fi
+
+    # 4. 生成并启动后台守护进程
     mkdir -p "$JBROOT/Library/LaunchDaemons"
     PLIST="$JBROOT/Library/LaunchDaemons/com.aurasign.pro.daemon.plist"
     DAEMON_BIN="$JBROOT/usr/bin/aurasignd"
@@ -41,9 +92,8 @@ EOF
 
     chown root:wheel "$PLIST" 2>/dev/null || true
     chmod 644 "$PLIST" 2>/dev/null || true
-    launchctl unload "$PLIST" 2>/dev/null || true
-    launchctl load -w "$PLIST" 2>/dev/null || true
+    "$JBROOT/bin/launchctl" unload "$PLIST" 2>/dev/null || launchctl unload "$PLIST" 2>/dev/null || true
+    "$JBROOT/bin/launchctl" load -w "$PLIST" 2>/dev/null || launchctl load -w "$PLIST" 2>/dev/null || true
 fi
 
-uicache -a 2>/dev/null || true
 exit 0

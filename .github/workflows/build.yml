@@ -20,8 +20,6 @@ jobs:
           curl -sL https://github.com/theos/sdks/archive/master.tar.gz | tar -xz -C $HOME/theos/sdks --strip-components=1
 
       - name: Build Dopamine (iphoneos-arm64) & Relaxin (iphoneos-arm64e) Packages
-        env:
-          THEOS: /Users/runner/theos
         run: |
           export THEOS=$HOME/theos
           chmod 0755 layout/DEBIAN/postinst
@@ -34,8 +32,14 @@ jobs:
           cp packages/*.deb packages_out/ 2>/dev/null || cp ./*.deb packages_out/ 2>/dev/null || true
           ls -lh packages_out/
 
-      - name: Upload Compiled .deb Packages
+      - name: Upload Dopamine (arm64) Package
         uses: actions/upload-artifact@v4
         with:
-          name: AuraSignPro-DualArch-Debs
-          path: packages_out/*.deb
+          name: AuraSignPro-Dopamine-arm64
+          path: packages_out/*arm64.deb
+
+      - name: Upload Relaxin (arm64e) Package
+        uses: actions/upload-artifact@v4
+        with:
+          name: AuraSignPro-Relaxin-arm64e
+          path: packages_out/*arm64e.deb
