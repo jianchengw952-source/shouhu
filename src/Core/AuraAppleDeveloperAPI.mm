@@ -7,6 +7,8 @@
 #import <objc/runtime.h>
 #import <spawn.h>
 #import <sys/wait.h>
+#import <sys/stat.h>
+#import <unistd.h>
 
 #if defined(__APPLE__)
 #include <crt_externs.h>
