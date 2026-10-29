@@ -17,13 +17,13 @@ extern char **environ;
 
 typedef CFPropertyListRef (*MGCopyAnswerFunc)(CFStringRef property);
 
-// 系统 AuthKit / AuthKitUI 真实私有方法声明
 @interface NSObject (AuraAuthKitRealAPI)
 - (void)setUsername:(NSString *)username;
 - (void)_setPassword:(NSString *)password;
 - (void)setIsUsernameEditable:(BOOL)editable;
 - (void)setServiceType:(NSInteger)type;
 - (void)setServiceIdentifier:(NSString *)identifier;
+- (void)setServiceIdentifiers:(NSArray<NSString *> *)identifiers;
 - (void)setPresentingViewController:(UIViewController *)vc;
 - (void)setShouldOfferSecurityUpgrade:(BOOL)offer;
 - (void)authenticateWithContext:(id)context completion:(void(^)(NSDictionary *results, NSError *error))completion;
@@ -122,8 +122,6 @@ typedef CFPropertyListRef (*MGCopyAnswerFunc)(CFStringRef property);
     return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 }
 
-#pragma mark - 1. 生成 RSA 私钥与 CSR，并将苹果官方返回的真 .cer 转成 .p12 (绝不自签造假!)
-
 - (NSString *)generatePrivateKeyAndCSRPEMForEmail:(NSString *)email {
     NSString *keyPath = [[self keychainDir] stringByAppendingPathComponent:@"dev_key.pem"];
     NSString *csrPath = [[self keychainDir] stringByAppendingPathComponent:@"dev_request.csr"];
@@ -145,7 +143,7 @@ typedef CFPropertyListRef (*MGCopyAnswerFunc)(CFStringRef property);
 
 - (BOOL)exportRealAppleDERCertToP12:(NSData *)derCertData {
     if (![derCertData isKindOfClass:[NSData class]] || derCertData.length == 0) {
-        return NO; // 绝不伪造自签名证书！没拿到苹果真 .cer 直接返回 NO
+        return NO;
     }
     NSString *keyPath = [[self keychainDir] stringByAppendingPathComponent:@"dev_key.pem"];
     NSString *derPath = [[self keychainDir] stringByAppendingPathComponent:@"apple_dev.cer"];
@@ -157,13 +155,10 @@ typedef CFPropertyListRef (*MGCopyAnswerFunc)(CFStringRef property);
     int r1 = [self runProcess:openssl args:@[@"x509", @"-inform", @"DER", @"-in", derPath, @"-out", pemPath]];
     int r2 = [self runProcess:openssl args:@[@"pkcs12", @"-export", @"-legacy", @"-out", p12Path, @"-inkey", keyPath, @"-in", pemPath, @"-passout", @"pass:"]];
     if (r2 != 0) {
-        // OpenSSL 1.1 兼容参数（不带 -legacy）
         r2 = [self runProcess:openssl args:@[@"pkcs12", @"-export", @"-out", p12Path, @"-inkey", keyPath, @"-in", pemPath, @"-passout", @"pass:"]];
     }
     return (r1 == 0 && r2 == 0 && [[NSFileManager defaultManager] fileExistsAtPath:p12Path]);
 }
-
-#pragma mark - 2. 苹果 QH65B2 开发者中心真实请求与错误码中文翻译
 
 - (NSDictionary *)sendQH65B2Request:(NSString *)actionPath
                            bodyDict:(NSDictionary *)bodyDict
@@ -179,6 +174,10 @@ typedef CFPropertyListRef (*MGCopyAnswerFunc)(CFStringRef property);
     [anisette enumerateKeysAndObjectsUsingBlock:^(NSString *k, NSString *v, BOOL *stop) {
         [req setValue:v forHTTPHeaderField:k];
     }];
+    NSString *udid = [self realDeviceUDID];
+    if (udid.length) {
+        [req setValue:udid forHTTPHeaderField:@"X-Mme-Device-Id"];
+    }
     if ([session[@"adsid"] length]) {
         [req setValue:session[@"adsid"] forHTTPHeaderField:@"X-Apple-I-Identity-Id"];
     }
@@ -186,7 +185,7 @@ typedef CFPropertyListRef (*MGCopyAnswerFunc)(CFStringRef property);
         [req setValue:session[@"xcodeToken"] forHTTPHeaderField:@"X-Apple-GS-Token"];
     }
     [req setValue:@"Xcode" forHTTPHeaderField:@"User-Agent"];
-    [req setValue:@"8.3" forHTTPHeaderField:@"X-Xcode-Version"];
+    [req setValue:@"15.2 (15C500b)" forHTTPHeaderField:@"X-Xcode-Version"];
     [req setValue:@"text/x-xml-plist" forHTTPHeaderField:@"Content-Type"];
     [req setValue:@"text/x-xml-plist" forHTTPHeaderField:@"Accept"];
 
@@ -224,21 +223,21 @@ typedef CFPropertyListRef (*MGCopyAnswerFunc)(CFStringRef property);
 }
 
 - (NSString *)translateAppleErrorCode:(NSInteger)code rawMessage:(NSString *)raw {
-    if (code == 1100) return @"登录凭证已过期或未通过双重认证 (1100)，请重新点击登录";
-    if (code == 7460) return @"该账号在其他电脑上生成的证书已满 (7460)，正在为您自动清理旧证书并接管...";
-    if (code == 9401) return @"该软件标识符 (Bundle ID) 已被占用 (9401)，正在自动附加您的专属 TeamID 后缀...";
+    if (code == 1100) return @"苹果会话令牌未通过校验 (1100)，请确认账号密码正确并完成双重认证";
+    if (code == 7460) return @"该账号在其他电脑上生成的证书已满 (7460)，正在自动为您吊销旧证书并重新签发...";
+    if (code == 9401) return @"该软件标识符已被占用 (9401)，正在自动附加您的专属 TeamID 后缀...";
     if (code == 9427) return @"本周免费账号的 10 个 App ID 注册额度已满 (9427)，请等待满 7 天自动释放或换用其他免费小号";
-    return [NSString stringWithFormat:@"苹果服务器提示 (%ld): %@", (long)code, raw];
+    return [NSString stringWithFormat:@"苹果服务器返回 (%ld): %@", (long)code, raw];
 }
 
-#pragma mark - 3. 调起 iOS 系统原生登录/双重认证窗口 + 完整 1 年期真证书签发
+#pragma mark - 【关键修复】：正确解析 AuthKit 返回字典中的 AKIdmsToken (NSDictionary / NSString) 与 ADSID
 
 - (void)authenticateWithSystemSheetFromViewController:(UIViewController *)presentingVC
                                          initialEmail:(NSString *)email
                                       initialPassword:(NSString *)password
                                            completion:(void(^)(BOOL success, NSString *errorMsg))completion {
 
-    dlopen("/System/Library/PrivateFrameworks/AuthKit.framework/AuthKit", RTLD_LAZY);
+    void *akHandle = dlopen("/System/Library/PrivateFrameworks/AuthKit.framework/AuthKit", RTLD_LAZY);
     dlopen("/System/Library/PrivateFrameworks/AuthKitUI.framework/AuthKitUI", RTLD_LAZY);
 
     Class inAppCtxClass = NSClassFromString(@"AKAppleIDAuthenticationInAppContext") ?: NSClassFromString(@"AKAppleIDAuthenticationContext");
@@ -261,10 +260,14 @@ typedef CFPropertyListRef (*MGCopyAnswerFunc)(CFStringRef property);
             [ctx setIsUsernameEditable:YES];
         }
         if ([ctx respondsToSelector:@selector(setServiceType:)]) {
-            [ctx setServiceType:1]; // GrandSlam
+            [ctx setServiceType:1];
         }
+        // 同时设置单数与复数 serviceIdentifier，确保 akd 签发 com.apple.gs.xcode.auth 令牌
         if ([ctx respondsToSelector:@selector(setServiceIdentifier:)]) {
             [ctx setServiceIdentifier:@"com.apple.gs.xcode.auth"];
+        }
+        if ([ctx respondsToSelector:@selector(setServiceIdentifiers:)]) {
+            [ctx setServiceIdentifiers:@[@"com.apple.gs.xcode.auth", @"com.apple.gs.idms.auth"]];
         }
         if ([ctx respondsToSelector:@selector(setShouldOfferSecurityUpgrade:)]) {
             [ctx setShouldOfferSecurityUpgrade:NO];
@@ -284,16 +287,53 @@ typedef CFPropertyListRef (*MGCopyAnswerFunc)(CFStringRef property);
             return;
         }
 
-        // 提取真实的 ADSID 与 Xcode GSA Token
-        NSString *realEmail = results[@"AKUsername"] ?: email ?: @"";
-        NSString *adsid = results[@"AKAltDSID"] ?: results[@"altDSID"] ?: @"";
-        NSDictionary *tokens = results[@"AKTokens"] ?: results[@"tokens"];
-        NSString *xcodeToken = ([tokens isKindOfClass:[NSDictionary class]] ? tokens[@"com.apple.gs.xcode.auth"] : nil)
-            ?: results[@"AKIdmsToken"] ?: @"";
+        // 通过 dlsym 读取 AuthKit 内部真实常量 Key，并兼容字典/字符串两种返回结构！
+        NSString * __strong *kAltDSIDPtr = akHandle ? (NSString * __strong *)dlsym(akHandle, "AKAuthenticationAlternateDSIDKey") : NULL;
+        NSString * __strong *kDSIDPtr    = akHandle ? (NSString * __strong *)dlsym(akHandle, "AKAuthenticationDSIDKey") : NULL;
+        NSString * __strong *kIdmsPtr    = akHandle ? (NSString * __strong *)dlsym(akHandle, "AKAuthenticationIDMSTokenKey") : NULL;
+        NSString * __strong *kPassPtr    = akHandle ? (NSString * __strong *)dlsym(akHandle, "AKAuthenticationPasswordKey") : NULL;
+        NSString * __strong *kMasterPtr  = akHandle ? (NSString * __strong *)dlsym(akHandle, "AKAuthenticationMasterTokenKey") : NULL;
 
-        if (!adsid.length || !xcodeToken.length) {
+        NSString *realEmail = results[@"AKUsername"] ?: results[@"username"] ?: email ?: @"";
+
+        // 1. 提取 ADSID
+        NSString *adsid = nil;
+        if (kAltDSIDPtr && *kAltDSIDPtr && results[*kAltDSIDPtr]) adsid = [NSString stringWithFormat:@"%@", results[*kAltDSIDPtr]];
+        if (!adsid.length) adsid = results[@"AKAltDSID"] ?: results[@"altDSID"];
+        if (!adsid.length && kDSIDPtr && *kDSIDPtr && results[*kDSIDPtr]) adsid = [NSString stringWithFormat:@"%@", results[*kDSIDPtr]];
+        if (!adsid.length) adsid = results[@"AKDSID"] ?: results[@"dsid"] ?: @"";
+
+        // 2. 提取 Xcode GSA Token（关键修复：AKIdmsToken 在 iOS 中通常是 NSDictionary @{@"com.apple.gs.xcode.auth": @"..."}！）
+        NSString *xcodeToken = nil;
+        id rawIdmsObj = (kIdmsPtr && *kIdmsPtr) ? results[*kIdmsPtr] : nil;
+        if (!rawIdmsObj) rawIdmsObj = results[@"AKIdmsToken"] ?: results[@"idmsToken"] ?: results[@"AKTokens"] ?: results[@"tokens"];
+
+        if ([rawIdmsObj isKindOfClass:[NSDictionary class]]) {
+            NSDictionary *tokenDict = (NSDictionary *)rawIdmsObj;
+            xcodeToken = tokenDict[@"com.apple.gs.xcode.auth"]
+                      ?: tokenDict[@"com.apple.gs.idms.auth"]
+                      ?: [tokenDict allValues].firstObject;
+        } else if ([rawIdmsObj isKindOfClass:[NSString class]]) {
+            xcodeToken = (NSString *)rawIdmsObj;
+        }
+
+        // 若字典内放在其它 Token 字段（如 MasterToken 或 Password PET），自动兜底提取
+        if (![xcodeToken isKindOfClass:[NSString class]] || xcodeToken.length == 0) {
+            id masterObj = (kMasterPtr && *kMasterPtr) ? results[*kMasterPtr] : (results[@"AKMasterToken"] ?: results[@"masterToken"]);
+            id passObj   = (kPassPtr && *kPassPtr) ? results[*kPassPtr] : (results[@"AKPassword"] ?: results[@"password"]);
+            if ([masterObj isKindOfClass:[NSString class]] && [masterObj length] > 0) {
+                xcodeToken = masterObj;
+            } else if ([passObj isKindOfClass:[NSString class]] && [passObj length] > 0) {
+                xcodeToken = passObj;
+            }
+        }
+
+        // 记录诊断日志，方便在右上角【日志】中查看返回了哪些字段
+        [[AuraSignEngine sharedEngine] appendTimelineLog:[NSString stringWithFormat:@"🔑 AuthKit 认证回调 keys: %@", [results.allKeys componentsJoinedByString:@","]] success:YES];
+
+        if (![xcodeToken isKindOfClass:[NSString class]] || xcodeToken.length == 0) {
             dispatch_async(dispatch_get_main_queue(), ^{
-                if (completion) completion(NO, @"未能从系统获取 Xcode 开发者令牌 (请确认 entitlements.xml 已签入 AuthKit 权限)");
+                if (completion) completion(NO, [NSString stringWithFormat:@"认证已返回但未包含令牌 (返回字段: %@)", [results.allKeys componentsJoinedByString:@", "]]);
             });
             return;
         }
@@ -302,26 +342,24 @@ typedef CFPropertyListRef (*MGCopyAnswerFunc)(CFStringRef property);
         dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
             NSMutableDictionary *sess = [NSMutableDictionary dictionaryWithDictionary:@{
                 @"email": realEmail,
-                @"adsid": adsid,
+                @"adsid": adsid ?: @"",
                 @"xcodeToken": xcodeToken,
                 @"udid": [self realDeviceUDID],
                 @"updatedAt": [NSDate date]
             }];
 
-            // Step 1: 获取个人开发者 Team ID (必须拿到真 Team ID，绝不造假!)
             NSError *stepErr = nil;
             NSDictionary *teamsResp = [self sendQH65B2Request:@"listTeams.action" bodyDict:@{} session:sess outError:&stepErr];
             NSArray *teams = teamsResp[@"teams"];
             if (![teams isKindOfClass:[NSArray class]] || teams.count == 0) {
                 dispatch_async(dispatch_get_main_queue(), ^{
-                    if (completion) completion(NO, stepErr.localizedDescription ?: @"该 Apple ID 尚未激活免费个人开发者团队，请重试");
+                    if (completion) completion(NO, stepErr.localizedDescription ?: @"未能获取个人开发者 TeamID，请确认账号密码正确");
                 });
                 return;
             }
             NSString *teamId = teams[0][@"teamId"];
             sess[@"teamId"] = teamId;
 
-            // Step 2: 注册本机真 UDID 到该 Team 下 (addDevice.action)
             NSString *udid = [self realDeviceUDID];
             if (udid.length) {
                 [self sendQH65B2Request:@"addDevice.action" bodyDict:@{
@@ -331,7 +369,6 @@ typedef CFPropertyListRef (*MGCopyAnswerFunc)(CFStringRef property);
                 } session:sess outError:NULL];
             }
 
-            // Step 3: 生成 CSR 并申请苹果官方 1 年期 .cer 开发证书 (若遇 7460 证书上限自动清理旧证书重试)
             NSString *csrContent = [self generatePrivateKeyAndCSRPEMForEmail:realEmail];
             NSError *csrErr = nil;
             NSDictionary *certResp = [self sendQH65B2Request:@"submitDevelopmentCSR.action" bodyDict:@{
@@ -341,7 +378,6 @@ typedef CFPropertyListRef (*MGCopyAnswerFunc)(CFStringRef property);
 
             NSData *derCert = certResp[@"certRequest"][@"certificate"][@"certContent"];
 
-            // 如果苹果返回 7460 (在其他电脑签过名导致证书数量满)，自动拉取旧证书并吊销后重新申请！
             if (!derCert && csrErr.code == 7460) {
                 NSDictionary *listCerts = [self sendQH65B2Request:@"listAllDevelopmentCerts.action" bodyDict:@{@"teamId": teamId} session:sess outError:NULL];
                 NSArray *certs = listCerts[@"certificates"];
@@ -375,15 +411,13 @@ typedef CFPropertyListRef (*MGCopyAnswerFunc)(CFStringRef property);
     }];
 }
 
-#pragma mark - 4. 查找/注册真实 10 位 appIdId 主键，并下载带苹果 CMS 签名的 7 天 .mobileprovision
-
 - (NSData *)requestReal7DayProvisioningProfileForBundleID:(NSString *)bundleID
                                                   appName:(NSString *)appName
                                         outResolvedBundle:(NSString **)outResolvedBundleID
                                                     error:(NSError **)outError {
     if (![self hasValidAccountInKeychain]) {
         if (outError) {
-            *outError = [NSError errorWithDomain:@"AuraSign" code:401 userInfo:@{NSLocalizedDescriptionKey: @"尚未登录 Apple ID！请先在【守护中心】点击【立即登录】绑定您的免费 Apple ID"}];
+            *outError = [NSError errorWithDomain:@"AuraSign" code:401 userInfo:@{NSLocalizedDescriptionKey: @"请先在【守护中心】点击【立即登录】绑定您的免费 Apple ID"}];
         }
         return nil;
     }
@@ -392,13 +426,11 @@ typedef CFPropertyListRef (*MGCopyAnswerFunc)(CFStringRef property);
     NSString *teamId = sess[@"teamId"];
     NSString *targetBundleID = bundleID ?: @"com.aurasign.app";
 
-    // 若 Bundle ID 尚未带有当前用户的 TeamID 后缀（例如从商店新下的原版 com.opa334.Dopamine），自动附加上 .TeamID 防止与全球他人重名报错 9401
     if (![targetBundleID hasSuffix:teamId] && [targetBundleID componentsSeparatedByString:@"."].count <= 3) {
         targetBundleID = [NSString stringWithFormat:@"%@.%@", targetBundleID, teamId];
     }
     if (outResolvedBundleID) *outResolvedBundleID = targetBundleID;
 
-    // Step 4A: 先调用 listAppIds.action 查询该账号下是否已存在该 Bundle ID，取出其 10 位内部主键 appIdId
     NSString *realAppIdPrimaryKey = nil;
     NSDictionary *listResp = [self sendQH65B2Request:@"listAppIds.action" bodyDict:@{@"teamId": teamId} session:sess outError:NULL];
     NSArray *existingAppIds = listResp[@"appIds"];
@@ -413,7 +445,6 @@ typedef CFPropertyListRef (*MGCopyAnswerFunc)(CFStringRef property);
         }
     }
 
-    // Step 4B: 若账号下尚未注册该 App ID，则调用 addAppId.action 注册并取出返回的 10 位 appIdId 主键
     if (!realAppIdPrimaryKey.length) {
         NSString *cleanName = [[appName componentsSeparatedByCharactersInSet:[[NSCharacterSet alphanumericCharacterSet] invertedSet]] componentsJoinedByString:@" "];
         cleanName = [cleanName stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
@@ -435,7 +466,6 @@ typedef CFPropertyListRef (*MGCopyAnswerFunc)(CFStringRef property);
         }
     }
 
-    // Step 5: 传入真实的 10 位 appIdId 主键，下载带苹果官方 CMS 签名的 7 天 .mobileprovision！
     NSError *dlErr = nil;
     NSDictionary *profResp = [self sendQH65B2Request:@"downloadTeamProvisioningProfile.action" bodyDict:@{
         @"teamId": teamId,
@@ -452,8 +482,6 @@ typedef CFPropertyListRef (*MGCopyAnswerFunc)(CFStringRef property);
     }
     return encodedProfile;
 }
-
-#pragma mark - 5. 越狱 .deb 解包与真实 zsign 签名校验
 
 - (NSString *)extractDylibFromDebPackage:(NSString *)debPath {
     if (![debPath.pathExtension.lowercaseString isEqualToString:@"deb"]) return debPath;
