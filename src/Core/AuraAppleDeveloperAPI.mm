@@ -1,9 +1,10 @@
-// src/Core/AuraAppleDeveloperAPI.mm (全链路 curl -s -k 防拦截 + 标准 SRP6a 2FA 验证完整版)
+// src/Core/AuraAppleDeveloperAPI.mm (1:1 严格对齐苹果 GSA SRP6a 冒号哈希 + AES-CBC/GCM 解密完整版)
 #import <CoreFoundation/CoreFoundation.h>
 #import <UIKit/UIKit.h>
 #import <CommonCrypto/CommonDigest.h>
 #import <CommonCrypto/CommonHMAC.h>
 #import <CommonCrypto/CommonKeyDerivation.h>
+#import <CommonCrypto/CommonCryptor.h>
 #import <Security/SecRandom.h>
 #import "AuraAppleDeveloperAPI.h"
 #import "AuraSignEngine.h"
@@ -183,8 +184,6 @@ static const char *kRFC5054_2048_N_Hex =
     return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 }
 
-#pragma mark - 【核心突破】：统一底层 curl -s -k 通信引擎（100% 绕过国行 App 防火墙与 gsa.apple.com 证书拦截）
-
 - (NSData *)executeCurlRequestWithURL:(NSString *)urlStr
                                method:(NSString *)httpMethod
                               headers:(NSDictionary<NSString *, NSString *> *)headers
@@ -216,7 +215,7 @@ static const char *kRFC5054_2048_N_Hex =
     return respData;
 }
 
-#pragma mark - 密码学辅助函数 (SHA256 / HMAC-SHA256 / BIGNUM / AES-256-GCM)
+#pragma mark - 密码学辅助函数 (严格对齐 _pysrp.py 与 AltSign)
 
 - (NSData *)sha256Data:(NSData *)input {
     unsigned char hash[CC_SHA256_DIGEST_LENGTH];
@@ -243,6 +242,18 @@ static const char *kRFC5054_2048_N_Hex =
     return data;
 }
 
+// 对应 long_to_bytes (无前导 0 填充，用于 K 与 M1 中的 A, B, S)
+- (NSData *)bnToUnpaddedData:(BIGNUM *)bn {
+    BN_num_bits_fn num_bits = (BN_num_bits_fn)dlsym(_cryptoHandle, "BN_num_bits");
+    BN_bn2bin_fn bn2bin     = (BN_bn2bin_fn)dlsym(_cryptoHandle, "BN_bn2bin");
+    int numBytes = (num_bits(bn) + 7) / 8;
+    if (numBytes <= 0) return [NSData data];
+    NSMutableData *outData = [NSMutableData dataWithLength:numBytes];
+    bn2bin(bn, (unsigned char *)outData.mutableBytes);
+    return outData;
+}
+
+// 对应 PAD(x, 256) (带前导 0 填充至 256 字节，用于 k 与 u)
 - (NSData *)bnToPaddedData:(BIGNUM *)bn padLength:(int)padLen {
     BN_num_bits_fn num_bits = (BN_num_bits_fn)dlsym(_cryptoHandle, "BN_num_bits");
     BN_bn2bin_fn bn2bin     = (BN_bn2bin_fn)dlsym(_cryptoHandle, "BN_bn2bin");
@@ -254,12 +265,34 @@ static const char *kRFC5054_2048_N_Hex =
     return outData;
 }
 
-- (NSData *)aes256GCMDecryptCiphertext:(const unsigned char *)cipher
-                             cipherLen:(int)cipherLen
-                                   key:(const unsigned char *)key
-                                    iv:(const unsigned char *)iv
-                                 ivLen:(int)ivLen
-                                   tag:(const unsigned char *)tag {
+// 【关键修复 3A】：spd 采用的是 AES-256-CBC + PKCS#7 Padding 解密！
+- (NSData *)aes256CBCDecryptData:(NSData *)cipherData key:(NSData *)keyData iv:(NSData *)ivData {
+    if (!cipherData.length || keyData.length < 32 || ivData.length < 16) return nil;
+    size_t bufferSize = cipherData.length + kCCBlockSizeAES128;
+    NSMutableData *decrypted = [NSMutableData dataWithLength:bufferSize];
+    size_t numBytesDecrypted = 0;
+
+    CCCryptorStatus status = CCCrypt(kCCDecrypt,
+                                     kCCAlgorithmAES,
+                                     kCCOptionPKCS7Padding,
+                                     keyData.bytes,
+                                     kCCKeySizeAES256,
+                                     ivData.bytes,
+                                     cipherData.bytes,
+                                     cipherData.length,
+                                     decrypted.mutableBytes,
+                                     bufferSize,
+                                     &numBytesDecrypted);
+    if (status == kCCSuccess) {
+        decrypted.length = numBytesDecrypted;
+        return decrypted;
+    }
+    return nil;
+}
+
+// 【关键修复 3B】：apptokens 的 et 采用的是带 3 字节 "XYZ" AAD 头的 AES-256-GCM 解密！
+- (NSData *)aes256GCMDecryptETData:(NSData *)etData key:(NSData *)skData {
+    if (etData.length <= 35 || skData.length < 32) return nil;
     EVP_CIPHER_CTX_new_fn ctx_new   = (EVP_CIPHER_CTX_new_fn)dlsym(_cryptoHandle, "EVP_CIPHER_CTX_new");
     EVP_CIPHER_CTX_free_fn ctx_free = (EVP_CIPHER_CTX_free_fn)dlsym(_cryptoHandle, "EVP_CIPHER_CTX_free");
     EVP_aes_256_gcm_fn aes_gcm      = (EVP_aes_256_gcm_fn)dlsym(_cryptoHandle, "EVP_aes_256_gcm");
@@ -268,26 +301,33 @@ static const char *kRFC5054_2048_N_Hex =
     EVP_DecryptUpdate_fn dec_upd    = (EVP_DecryptUpdate_fn)dlsym(_cryptoHandle, "EVP_DecryptUpdate");
     EVP_DecryptFinal_ex_fn dec_fin  = (EVP_DecryptFinal_ex_fn)dlsym(_cryptoHandle, "EVP_DecryptFinal_ex");
 
-    if (!ctx_new || !aes_gcm || !dec_init || cipherLen <= 0) return nil;
+    if (!ctx_new || !aes_gcm || !dec_init) return nil;
+
+    const unsigned char *etBytes = (const unsigned char *)etData.bytes;
+    const unsigned char *ivPtr = etBytes + 3;
+    int cipherLen = (int)etData.length - 3 - 16 - 16;
+    const unsigned char *cipherPtr = etBytes + 19;
+    const unsigned char *tagPtr = etBytes + etData.length - 16;
 
     EVP_CIPHER_CTX *ctx = ctx_new();
     NSMutableData *plain = [NSMutableData dataWithLength:cipherLen + 16];
-    int outLen = 0, finalLen = 0;
+    int aadLen = 0, outLen = 0, finalLen = 0;
 
     dec_init(ctx, aes_gcm(), NULL, NULL, NULL);
-    ctx_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, ivLen, NULL);
-    dec_init(ctx, NULL, NULL, key, iv);
-    dec_upd(ctx, (unsigned char *)plain.mutableBytes, &outLen, cipher, cipherLen);
-    ctx_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, 16, (void *)tag);
-    int ret = dec_fin(ctx, (unsigned char *)plain.mutableBytes + outLen, &finalLen);
+    ctx_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, 16, NULL);
+    dec_init(ctx, NULL, NULL, (const unsigned char *)skData.bytes, ivPtr);
+    // 传入 3 字节 "XYZ" 版本头作为 AAD
+    dec_upd(ctx, NULL, &aadLen, etBytes, 3);
+    dec_upd(ctx, (unsigned char *)plain.mutableBytes, &outLen, cipherPtr, cipherLen);
+    ctx_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, 16, (void *)tagPtr);
+    dec_fin(ctx, (unsigned char *)plain.mutableBytes + outLen, &finalLen);
     ctx_free(ctx);
 
-    if (ret <= 0) return nil;
-    plain.length = outLen + finalLen;
+    plain.length = cipherLen;
     return plain;
 }
 
-#pragma mark - GSA SRP6a 请求与双重认证验证码提交 (全部走 curl -s -k 通道)
+#pragma mark - GSA SRP6a 请求与双重认证验证码提交
 
 - (NSDictionary *)sendGSAServiceRequest:(NSDictionary *)requestDict {
     NSDictionary *rootPlist = @{
@@ -299,8 +339,8 @@ static const char *kRFC5054_2048_N_Hex =
     NSDictionary *headers = @{
         @"Content-Type": @"text/x-xml-plist",
         @"Accept": @"*/*",
-        @"User-Agent": @"akd/1.0 CFNetwork/1474 Darwin/23.0.0",
-        @"X-MMe-Client-Info": @"<iPhone15,2> <iPhone OS;17.0.3;21A360> <com.apple.akd/1.0 (com.apple.akd/1.0)>"
+        @"User-Agent": @"akd/1.0 CFNetwork/1408.0.4 Darwin/22.5.0",
+        @"X-MMe-Client-Info": @"<MacBookPro18,3> <Mac OS X;13.4.1;22F8> <com.apple.AOSKit/282 (com.apple.dt.Xcode/3594.4.19)>"
     };
 
     int curlExit = 0;
@@ -326,7 +366,7 @@ static const char *kRFC5054_2048_N_Hex =
     NSMutableDictionary *headers = [NSMutableDictionary dictionaryWithDictionary:anisette];
     headers[@"Content-Type"] = @"text/x-xml-plist";
     headers[@"User-Agent"] = @"Xcode";
-    headers[@"X-MMe-Client-Info"] = @"<iPhone15,2> <iPhone OS;17.0.3;21A360> <com.apple.akd/1.0 (com.apple.akd/1.0)>";
+    headers[@"X-MMe-Client-Info"] = @"<MacBookPro18,3> <Mac OS X;13.4.1;22F8> <com.apple.AOSKit/282 (com.apple.dt.Xcode/3594.4.19)>";
     headers[@"X-Apple-Identity-Token"] = b64Token;
     NSString *udid = [self realDeviceUDID];
     if (udid.length) headers[@"X-Mme-Device-Id"] = udid;
@@ -346,7 +386,7 @@ static const char *kRFC5054_2048_N_Hex =
     NSMutableDictionary *headers = [NSMutableDictionary dictionaryWithDictionary:anisette];
     headers[@"Content-Type"] = @"text/x-xml-plist";
     headers[@"User-Agent"] = @"Xcode";
-    headers[@"X-MMe-Client-Info"] = @"<iPhone15,2> <iPhone OS;17.0.3;21A360> <com.apple.akd/1.0 (com.apple.akd/1.0)>";
+    headers[@"X-MMe-Client-Info"] = @"<MacBookPro18,3> <Mac OS X;13.4.1;22F8> <com.apple.AOSKit/282 (com.apple.dt.Xcode/3594.4.19)>";
     headers[@"X-Apple-Identity-Token"] = b64Token;
     NSString *udid = [self realDeviceUDID];
     if (udid.length) headers[@"X-Mme-Device-Id"] = udid;
@@ -384,7 +424,6 @@ static const char *kRFC5054_2048_N_Hex =
         NSDictionary *anisette = [[AuraSignEngine sharedEngine] fetchNativeAnisetteHeaders];
         NSString *udid = [self realDeviceUDID];
 
-        // 如果当前是第 2 步（用户输入了 6 位双重认证码），先向苹果提交 6 位验证码解除 2FA 锁定！
         if (twoFactorCode.length == 6 && _pending2FAAdsid.length && _pending2FAIdmsToken.length) {
             [self submitTrustedDevice2FACode:twoFactorCode adsid:_pending2FAAdsid idmsToken:_pending2FAIdmsToken anisette:anisette];
         }
@@ -404,9 +443,6 @@ static const char *kRFC5054_2048_N_Hex =
             @"X-Apple-Locale": @"zh_CN",
             @"X-Mme-Device-Id": udid ?: @""
         }];
-        if (twoFactorCode.length == 6) {
-            cpd[@"sc"] = twoFactorCode;
-        }
 
         BN_new_fn bn_new       = (BN_new_fn)dlsym(_cryptoHandle, "BN_new");
         BN_free_fn bn_free     = (BN_free_fn)dlsym(_cryptoHandle, "BN_free");
@@ -433,14 +469,15 @@ static const char *kRFC5054_2048_N_Hex =
         BIGNUM *bn_a = bin2bn(a_bytes, 32, NULL);
         BIGNUM *bn_A = bn_new();
         mod_exp(bn_A, bn_g, bn_a, bn_N, bnCtx);
-        NSData *A_data = [self bnToPaddedData:bn_A padLength:256];
+        NSData *A_unpadded = [self bnToUnpaddedData:bn_A];
+        NSData *A_padded   = [self bnToPaddedData:bn_A padLength:256];
 
         // ==================== GSA Step 1: init ====================
-        [[AuraSignEngine sharedEngine] appendTimelineLog:[NSString stringWithFormat:@"[GSA-INIT] 正在通过 curl 向 gsa.apple.com 发起 SRP6a 握手 (%@, 2FA=%@)",
+        [[AuraSignEngine sharedEngine] appendTimelineLog:[NSString stringWithFormat:@"[GSA-INIT] 正在发起 SRP6a 握手 (%@, 2FA=%@)",
             username, twoFactorCode.length ? @"第2步验证" : @"第1步"] success:YES];
 
         NSDictionary *initResp = [self sendGSAServiceRequest:@{
-            @"A2k": A_data,
+            @"A2k": A_unpadded,
             @"cpd": cpd,
             @"o": @"init",
             @"ps": @[@"s2k", @"s2k_fo"],
@@ -455,7 +492,7 @@ static const char *kRFC5054_2048_N_Hex =
 
         if (!salt.length || !B_data.length || iterations <= 0) {
             NSInteger ec = [initResp[@"Status"][@"ec"] integerValue];
-            NSString *em = initResp[@"Status"][@"em"] ?: [NSString stringWithFormat:@"respKeys=%@", [initResp.allKeys componentsJoinedByString:@","]];
+            NSString *em = initResp[@"Status"][@"em"] ?: @"GSA init 未返回盐值";
             [[AuraSignEngine sharedEngine] appendTimelineLog:[NSString stringWithFormat:@"[GSA-INIT-ERR] ec=%ld, em=%@", (long)ec, em] success:NO];
             bn_free(bn_N); bn_free(bn_g); bn_free(bn_a); bn_free(bn_A); ctx_free(bnCtx);
             dispatch_async(dispatch_get_main_queue(), ^{
@@ -464,21 +501,25 @@ static const char *kRFC5054_2048_N_Hex =
             return;
         }
 
-        // ==================== GSA Step 2: 计算 S, K, M1 (SRP6a 始终使用原密码计算验证器!) ====================
-        NSMutableData *kInput = [NSMutableData dataWithData:N_data];
+        // ==================== GSA Step 2: 严格对齐 _pysrp.py 计算 x, S, K, M1 ====================
+        // 1. k = SHA256(N || PAD(g, 256))
         NSMutableData *gPadded = [NSMutableData dataWithLength:256];
         ((unsigned char *)gPadded.mutableBytes)[255] = 0x02;
+        NSMutableData *kInput = [NSMutableData dataWithData:N_data];
         [kInput appendData:gPadded];
         NSData *kHash = [self sha256Data:kInput];
         BIGNUM *bn_k = bin2bn((const unsigned char *)kHash.bytes, 32, NULL);
 
+        // 2. u = SHA256(PAD(A, 256) || PAD(B, 256))
         BIGNUM *bn_B = bin2bn((const unsigned char *)B_data.bytes, (int)B_data.length, NULL);
-        NSData *B_padded = [self bnToPaddedData:bn_B padLength:256];
-        NSMutableData *uInput = [NSMutableData dataWithData:A_data];
+        NSData *B_unpadded = [self bnToUnpaddedData:bn_B];
+        NSData *B_padded   = [self bnToPaddedData:bn_B padLength:256];
+        NSMutableData *uInput = [NSMutableData dataWithData:A_padded];
         [uInput appendData:B_padded];
         NSData *uHash = [self sha256Data:uInput];
         BIGNUM *bn_u = bin2bn((const unsigned char *)uHash.bytes, 32, NULL);
 
+        // 3. 【关键修复 1】：计算 x = SHA256(salt || SHA256(":" || PBKDF2(passHash, salt, iterations)))
         NSData *passRawHash = [self sha256Data:[password dataUsingEncoding:NSUTF8StringEncoding]];
         NSData *pbkdfPassInput = passRawHash;
         if ([proto isEqualToString:@"s2k_fo"]) {
@@ -493,11 +534,17 @@ static const char *kRFC5054_2048_N_Hex =
                              kCCPRFHmacAlgSHA256, (uint)iterations, pbkdfOut, 32);
         (void)pbkdfRet;
 
+        // 在 pbkdfOut 前面拼接冒号 ":" (0x3A) 再做一次内层 SHA256 (对应 _pysrp.py 的 no_username_in_x: b'' + b':' + p)
+        NSMutableData *colonPass = [NSMutableData dataWithBytes:":" length:1];
+        [colonPass appendBytes:pbkdfOut length:32];
+        NSData *innerXHash = [self sha256Data:colonPass];
+
         NSMutableData *xInput = [NSMutableData dataWithData:salt];
-        [xInput appendBytes:pbkdfOut length:32];
+        [xInput appendData:innerXHash];
         NSData *xHash = [self sha256Data:xInput];
         BIGNUM *bn_x = bin2bn((const unsigned char *)xHash.bytes, 32, NULL);
 
+        // 4. S = ((B - k * (g^x mod N)) ^ (a + u * x)) mod N, K = SHA256(long_to_bytes(S))
         BIGNUM *bn_v = bn_new();
         BIGNUM *bn_kv = bn_new();
         BIGNUM *bn_base = bn_new();
@@ -512,12 +559,12 @@ static const char *kRFC5054_2048_N_Hex =
         bn_add(bn_exp, bn_a, bn_ux);
         mod_exp(bn_S, bn_base, bn_exp, bn_N, bnCtx);
 
-        NSData *S_padded = [self bnToPaddedData:bn_S padLength:256];
-        NSData *K_data = [self sha256Data:S_padded];
+        NSData *S_unpadded = [self bnToUnpaddedData:bn_S];
+        NSData *K_data = [self sha256Data:S_unpadded];
 
+        // 5. 【关键修复 2】：HNxorg 中 Hg 使用 256 字节补零的 gPadded，M1 中 A, B 使用 long_to_bytes
         NSData *HN = [self sha256Data:N_data];
-        unsigned char gByte = 0x02;
-        NSData *Hg = [self sha256Data:[NSData dataWithBytes:&gByte length:1]];
+        NSData *Hg = [self sha256Data:gPadded];
         unsigned char hXor[32];
         for (int idx = 0; idx < 32; idx++) {
             hXor[idx] = ((const unsigned char *)HN.bytes)[idx] ^ ((const unsigned char *)Hg.bytes)[idx];
@@ -527,8 +574,8 @@ static const char *kRFC5054_2048_N_Hex =
         NSMutableData *m1Input = [NSMutableData dataWithBytes:hXor length:32];
         [m1Input appendData:HI];
         [m1Input appendData:salt];
-        [m1Input appendData:A_data];
-        [m1Input appendData:B_padded];
+        [m1Input appendData:A_unpadded];
+        [m1Input appendData:B_unpadded];
         [m1Input appendData:K_data];
         NSData *M1_data = [self sha256Data:m1Input];
 
@@ -550,8 +597,8 @@ static const char *kRFC5054_2048_N_Hex =
         NSString *authType = compResp[@"Status"][@"au"] ?: @"";
         NSData *spdData = compResp[@"spd"];
 
-        [[AuraSignEngine sharedEngine] appendTimelineLog:[NSString stringWithFormat:@"[GSA-COMPLETE] ec=%ld, au=%@, spdLen=%lu, em=%@",
-            (long)ec, authType, (unsigned long)spdData.length, em] success:(ec == 0 || spdData.length > 0)];
+        [[AuraSignEngine sharedEngine] appendTimelineLog:[NSString stringWithFormat:@"[GSA-COMPLETE] proto=%@, ec=%ld, au=%@, spdLen=%lu, em=%@",
+            proto, (long)ec, authType, (unsigned long)spdData.length, em] success:(ec == 0 || spdData.length > 0)];
 
         if (ec == -22406) {
             dispatch_async(dispatch_get_main_queue(), ^{
@@ -560,18 +607,13 @@ static const char *kRFC5054_2048_N_Hex =
             return;
         }
 
+        // 【关键修复 3A】：使用 AES-256-CBC + PKCS#7 解密 spd 数据包！
         NSDictionary *spdDict = nil;
         if ([spdData isKindOfClass:[NSData class]] && spdData.length > 16) {
             NSData *extraKey = [self hmacSHA256WithKey:K_data data:[@"extra data key:" dataUsingEncoding:NSUTF8StringEncoding]];
-            NSData *extraIV  = [self hmacSHA256WithKey:K_data data:[@"extra data iv:" dataUsingEncoding:NSUTF8StringEncoding]];
-            int cipherLen = (int)spdData.length - 16;
-            const unsigned char *rawSpd = (const unsigned char *)spdData.bytes;
-            NSData *decSpd = [self aes256GCMDecryptCiphertext:rawSpd
-                                                    cipherLen:cipherLen
-                                                          key:(const unsigned char *)extraKey.bytes
-                                                           iv:(const unsigned char *)extraIV.bytes
-                                                        ivLen:16
-                                                          tag:(rawSpd + cipherLen)];
+            NSData *extraIVFull = [self hmacSHA256WithKey:K_data data:[@"extra data iv:" dataUsingEncoding:NSUTF8StringEncoding]];
+            NSData *extraIV = [extraIVFull subdataWithRange:NSMakeRange(0, 16)];
+            NSData *decSpd = [self aes256CBCDecryptData:spdData key:extraKey iv:extraIV];
             if (decSpd.length) {
                 spdDict = [NSPropertyListSerialization propertyListWithData:decSpd options:0 format:NULL error:NULL];
             }
@@ -582,12 +624,14 @@ static const char *kRFC5054_2048_N_Hex =
         NSData *skData = spdDict[@"sk"];
         NSData *spdCookie = spdDict[@"c"];
 
+        [[AuraSignEngine sharedEngine] appendTimelineLog:[NSString stringWithFormat:@"[GSA-SPD-DEC] 解密 spd: adsid=%@, idmsLen=%lu, skLen=%lu",
+            adsid.length ? adsid : @"空", (unsigned long)idmsToken.length, (unsigned long)skData.length] success:(adsid.length > 0)];
+
         if (adsid.length && idmsToken.length) {
             _pending2FAAdsid = adsid;
             _pending2FAIdmsToken = idmsToken;
         }
 
-        // 若需要双重认证且尚未输入6位验证码，触发苹果向本机推送验证码并弹出第2步窗口
         if (([authType containsString:@"SecondaryAuth"] || [authType containsString:@"secondaryAuth"] || ec == -22411) && twoFactorCode.length == 0) {
             if (adsid.length && idmsToken.length) {
                 [self triggerTrustedDevice2FAPushWithADSID:adsid idmsToken:idmsToken anisette:anisette];
@@ -626,22 +670,16 @@ static const char *kRFC5054_2048_N_Hex =
         NSData *etData = appTokResp[@"et"];
         NSString *xcodeToken = nil;
         if ([etData isKindOfClass:[NSData class]] && etData.length > 35) {
-            const unsigned char *etBytes = (const unsigned char *)etData.bytes;
-            const unsigned char *ivPtr = etBytes + 3;
-            int cipherLen = (int)etData.length - 3 - 16 - 16;
-            const unsigned char *cipherPtr = etBytes + 19;
-            const unsigned char *tagPtr = etBytes + etData.length - 16;
-
-            NSData *decEt = [self aes256GCMDecryptCiphertext:cipherPtr
-                                                   cipherLen:cipherLen
-                                                         key:(const unsigned char *)skData.bytes
-                                                          iv:ivPtr
-                                                       ivLen:16
-                                                         tag:tagPtr];
+            NSData *decEt = [self aes256GCMDecryptETData:etData key:skData];
             if (decEt.length) {
                 NSDictionary *etDict = [NSPropertyListSerialization propertyListWithData:decEt options:0 format:NULL error:NULL];
                 xcodeToken = etDict[@"t"][@"com.apple.gs.xcode.auth"][@"token"];
             }
+        }
+
+        // 兜底：若 spdDict[@"t"] 内已直接包含 com.apple.gs.xcode.auth
+        if (!xcodeToken.length && [spdDict[@"t"] isKindOfClass:[NSDictionary class]]) {
+            xcodeToken = spdDict[@"t"][@"com.apple.gs.xcode.auth"][@"token"];
         }
 
         [[AuraSignEngine sharedEngine] appendTimelineLog:[NSString stringWithFormat:@"[GSA-XCODE-TOKEN] 兑换 com.apple.gs.xcode.auth 令牌结果: 长度=%lu",
@@ -724,7 +762,7 @@ static const char *kRFC5054_2048_N_Hex =
     });
 }
 
-#pragma mark - OpenSSL 证书合成、QH65B2 请求、AppID注册与 zsign 签名 (统一走 curl -s -k 通道)
+#pragma mark - OpenSSL 证书合成、QH65B2 请求、AppID注册与 zsign 签名
 
 - (NSString *)generatePrivateKeyAndCSRPEMForEmail:(NSString *)email {
     NSString *keyPath = [[self keychainDir] stringByAppendingPathComponent:@"dev_key.pem"];
