@@ -1,0 +1,49 @@
+#!/bin/sh
+set -e
+
+JBROOT=""
+if [ -d "/var/jb" ]; then
+    JBROOT="/var/jb"
+else
+    JBROOT=$(find /var/containers/Bundle/Application/ -maxdepth 1 -name ".jbroot-*" 2>/dev/null | head -n 1)
+fi
+
+if [ -n "$JBROOT" ]; then
+    mkdir -p "$JBROOT/Library/LaunchDaemons"
+    PLIST="$JBROOT/Library/LaunchDaemons/com.aurasign.pro.daemon.plist"
+    DAEMON_BIN="$JBROOT/usr/bin/aurasignd"
+
+    cat <<EOF > "$PLIST"
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.aurasign.pro.daemon</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>$DAEMON_BIN</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>StartInterval</key>
+    <integer>7200</integer>
+    <key>ProcessType</key>
+    <string>Interactive</string>
+</dict>
+</plist>
+EOF
+
+    chown root:wheel "$PLIST" 2>/dev/null || true
+    chmod 644 "$PLIST" 2>/dev/null || true
+    launchctl unload "$PLIST" 2>/dev/null || true
+    launchctl load -w "$PLIST" 2>/dev/null || true
+fi
+
+uicache -a 2>/dev/null || true
+exit 0
