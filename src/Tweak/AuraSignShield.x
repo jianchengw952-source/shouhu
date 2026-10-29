@@ -1,9 +1,9 @@
-@interface SBPowerDownViewController : UIViewController
-@end
-
 #import <UIKit/UIKit.h>
 #import "AuraSignEngine.h"
 #import "AuraLiquidGlassView.h"
+
+@interface SBPowerDownViewController : UIViewController
+@end
 
 %hook SBPowerDownViewController
 
