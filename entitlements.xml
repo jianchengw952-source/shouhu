@@ -8,10 +8,16 @@
     <true/>
     <key>com.apple.private.security.container-required</key>
     <false/>
+    <!-- 允许直接调起 iOS 系统原生 Apple ID 登录与双重认证弹窗并获取 Xcode GSA 令牌 -->
+    <key>com.apple.authkit.client</key>
+    <true/>
     <key>com.apple.authkit.client.internal</key>
     <true/>
     <key>com.apple.authkit.client.private</key>
     <true/>
+    <key>com.apple.developer.apple-id-authentication</key>
+    <true/>
+    <!-- 允许调用 MobileInstallation 与 libmis -->
     <key>com.apple.private.mobileinstall.allowedSPI</key>
     <true/>
     <key>com.apple.private.misagent</key>
