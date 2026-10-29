@@ -17,6 +17,8 @@ extern char **environ;
 
 @interface NSObject (AuraDynamicPrivateAPIs)
 - (id)anisetteDataWithError:(NSError **)error;
+- (void)anisetteDataWithCompletion:(void(^)(id data, NSError *error))completion;
+- (void)provisionWithCompletion:(void(^)(BOOL succeeded, NSError *error))completion;
 - (NSString *)machineID;
 - (NSString *)oneTimePassword;
 - (unsigned long long)routingInfo;
@@ -38,9 +40,7 @@ typedef int (*MobileInstallationInstallFunc)(CFStringRef path, CFDictionaryRef o
 @implementation AuraRepoAppItem
 @end
 
-@implementation AuraSignEngine {
-    NSMutableArray<AuraRepoAppItem *> *_customRepoItems;
-}
+@implementation AuraSignEngine
 
 + (instancetype)sharedEngine {
     static AuraSignEngine *instance = nil;
@@ -53,7 +53,6 @@ typedef int (*MobileInstallationInstallFunc)(CFStringRef path, CFDictionaryRef o
 
 - (instancetype)init {
     if (self = [super init]) {
-        _customRepoItems = [NSMutableArray array];
         dlopen("/System/Library/PrivateFrameworks/AuthKit.framework/AuthKit", RTLD_LAZY);
         dlopen("/System/Library/Frameworks/CoreServices.framework/CoreServices", RTLD_LAZY);
         [self loadPreferences];
@@ -89,35 +88,67 @@ typedef int (*MobileInstallationInstallFunc)(CFStringRef path, CFDictionaryRef o
     [dict writeToFile:AURA_PREFS_PATH atomically:YES];
 }
 
+#pragma mark - 01. 同步 + 异步双通道获取本机 Anisette 机器码 (并写入详细诊断日志)
+
 - (NSDictionary<NSString *, NSString *> *)fetchNativeAnisetteHeaders {
-    NSError *err = nil;
+    __block id anisetteDataObj = nil;
+    __block NSError *aniErr = nil;
+
     Class ctrlClass = NSClassFromString(@"AKAnisetteProvisioningController");
     if (ctrlClass) {
         id ctrl = [[ctrlClass alloc] init];
+        // 1. 先尝试同步获取
         if ([ctrl respondsToSelector:@selector(anisetteDataWithError:)]) {
-            id data = [ctrl anisetteDataWithError:&err];
-            if (data && [data oneTimePassword] && [data machineID]) {
-                NSISO8601DateFormatter *iso = [[NSISO8601DateFormatter alloc] init];
-                return @{
-                    @"X-Apple-I-MD": [data oneTimePassword],
-                    @"X-Apple-I-MD-M": [data machineID],
-                    @"X-Apple-I-MD-RINFO": [NSString stringWithFormat:@"%llu", [data routingInfo]],
-                    @"X-Apple-I-Client-Time": [iso stringFromDate:[NSDate date]],
-                    @"X-Apple-I-TimeZone": [[NSTimeZone localTimeZone] abbreviation] ?: @"CST",
-                    @"X-Apple-Locale": @"zh_CN"
-                };
-            }
+            NSError *syncErr = nil;
+            anisetteDataObj = [ctrl anisetteDataWithError:&syncErr];
+            aniErr = syncErr;
+        }
+        // 2. 若同步返回空，使用异步回调获取
+        if (!anisetteDataObj && [ctrl respondsToSelector:@selector(anisetteDataWithCompletion:)]) {
+            dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+            [ctrl anisetteDataWithCompletion:^(id data, NSError *error) {
+                anisetteDataObj = data;
+                aniErr = error;
+                dispatch_semaphore_signal(sem);
+            }];
+            dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC));
         }
     }
-    return @{@"X-Apple-Locale": @"zh_CN"};
+
+    NSISO8601DateFormatter *iso = [[NSISO8601DateFormatter alloc] init];
+    NSString *clientTime = [iso stringFromDate:[NSDate date]];
+    NSString *tz = [[NSTimeZone localTimeZone] abbreviation] ?: @"CST";
+
+    if (anisetteDataObj && [anisetteDataObj oneTimePassword] && [anisetteDataObj machineID]) {
+        NSString *otp = [anisetteDataObj oneTimePassword];
+        NSString *mid = [anisetteDataObj machineID];
+        NSString *rinfo = [NSString stringWithFormat:@"%llu", [anisetteDataObj routingInfo]];
+        [self appendTimelineLog:[NSString stringWithFormat:@"[ANISETTE] 成功获取本机原生机器码: MD长度=%lu, MID长度=%lu, RINFO=%@",
+                                 (unsigned long)otp.length, (unsigned long)mid.length, rinfo] success:YES];
+        return @{
+            @"X-Apple-I-MD": otp,
+            @"X-Apple-I-MD-M": mid,
+            @"X-Apple-I-MD-RINFO": rinfo,
+            @"X-Apple-I-Client-Time": clientTime,
+            @"X-Apple-I-TimeZone": tz,
+            @"X-Apple-Locale": @"zh_CN"
+        };
+    }
+
+    [self appendTimelineLog:[NSString stringWithFormat:@"[ANISETTE-ERROR] 本机 AuthKit 未返回机器码! class=%@, err=%@",
+                             ctrlClass, aniErr.localizedDescription ?: @"nil"] success:NO];
+    return @{
+        @"X-Apple-I-Client-Time": clientTime,
+        @"X-Apple-I-TimeZone": tz,
+        @"X-Apple-Locale": @"zh_CN"
+    };
 }
 
 - (BOOL)verifyUnjailbrokenBootability:(NSString *)bundlePath {
     if (!bundlePath.length) return NO;
     NSString *mobileProv = [bundlePath stringByAppendingPathComponent:@"embedded.mobileprovision"];
-    if (![[NSFileManager defaultManager] fileExistsAtPath:mobileProv]) {
-        return NO;
-    }
+    if (![[NSFileManager defaultManager] fileExistsAtPath:mobileProv]) return NO;
+
     void *misHandle = dlopen("/usr/lib/libmis.dylib", RTLD_LAZY);
     if (!misHandle) return NO;
     MISValidateSignatureFunc validateFunc = (MISValidateSignatureFunc)dlsym(misHandle, "MISValidateSignatureAndCopyInfo");
@@ -206,7 +237,7 @@ typedef int (*MobileInstallationInstallFunc)(CFStringRef path, CFDictionaryRef o
             foundLoader = YES;
             if (app.isFakeSigned || !app.isLibmisVerified || app.remainingDays <= 0.0) {
                 if (outSummary) {
-                    *outSummary = [NSString stringWithFormat:@"⚠️ 高危：检测到【%@】当前为假签名或证书已过期！若现在关机重启将无法打开越狱工具，请先绑定 Apple ID 并点下方【一键转真签】！", app.appName];
+                    *outSummary = [NSString stringWithFormat:@"⚠️ 高危：检测到【%@】当前为假签名或证书已过期！若现在关机重启将无法打开越狱工具，请先绑定 Apple ID 并点下方【立即修复】！", app.appName];
                 }
                 return AuraShieldStatusDanger;
             }
@@ -215,7 +246,7 @@ typedef int (*MobileInstallationInstallFunc)(CFStringRef path, CFDictionaryRef o
     }
 
     if (!foundLoader) {
-        if (outSummary) *outSummary = @"已就绪 · 请先绑定您的免费 Apple ID，随后可在【精选商店】一键签装越狱工具与常用应用";
+        if (outSummary) *outSummary = @"已就绪 · 请先绑定您的免费 Apple ID，随后可为越狱工具与侧载应用开启 7 天真证书自动续签";
         return AuraShieldStatusSafe;
     }
 
@@ -242,8 +273,6 @@ typedef int (*MobileInstallationInstallFunc)(CFStringRef path, CFDictionaryRef o
         chmod(fullPath.UTF8String, 0755);
     }
 }
-
-#pragma mark - 真实签名与安装闭环 (绝不伪造成功!)
 
 - (BOOL)installAndSignIPAFileAtPath:(NSString *)ipaFilePath
                          customName:(NSString *)customName
@@ -309,11 +338,10 @@ typedef int (*MobileInstallationInstallFunc)(CFStringRef path, CFDictionaryRef o
         if (outError) {
             *outError = [NSError errorWithDomain:@"AuraSign" code:401 userInfo:@{NSLocalizedDescriptionKey: @"您尚未绑定 Apple ID！请先在【守护中心】点击【立即登录】绑定您的免费 Apple ID"}];
         }
-        [self appendTimelineLog:[NSString stringWithFormat:@"❌【%@】签名中止：尚未登录绑定 Apple ID", app.appName] success:NO];
+        [self appendTimelineLog:[NSString stringWithFormat:@"[SIGN-ABORT] 【%@】签名中止：尚未登录绑定 Apple ID", app.appName] success:NO];
         return NO;
     }
 
-    // 1. 先向苹果服务器申请该应用对应的真实 7 天 .mobileprovision (若失败直接返回真实错误，绝不造假!)
     NSString *requestedBundleID = (customBundleID.length && !app.isJailbreakLoader) ? customBundleID : app.bundleID;
     NSString *resolvedBundleID = requestedBundleID;
     NSData *realProfileData = [api requestReal7DayProvisioningProfileForBundleID:requestedBundleID
@@ -322,11 +350,10 @@ typedef int (*MobileInstallationInstallFunc)(CFStringRef path, CFDictionaryRef o
                                                                            error:outError];
     if (!realProfileData || realProfileData.length == 0) {
         NSString *errMsg = (outError && *outError) ? (*outError).localizedDescription : @"未能从苹果获取 7 天描述文件";
-        [self appendTimelineLog:[NSString stringWithFormat:@"❌【%@】获取苹果描述文件失败：%@", app.appName, errMsg] success:NO];
+        [self appendTimelineLog:[NSString stringWithFormat:@"[SIGN-ERR] 【%@】获取苹果描述文件失败：%@", app.appName, errMsg] success:NO];
         return NO;
     }
 
-    // 2. 准备 installd 标准暂存目录 (/var/mobile/Media/PublicStaging)
     NSString *publicStaging = @"/var/mobile/Media/PublicStaging";
     [[NSFileManager defaultManager] createDirectoryAtPath:publicStaging withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions: @(0755)} error:nil];
     chown(publicStaging.UTF8String, 501, 501);
@@ -339,13 +366,11 @@ typedef int (*MobileInstallationInstallFunc)(CFStringRef path, CFDictionaryRef o
     NSString *stagedAppPath = [payloadDir stringByAppendingPathComponent:appFolderName];
     [[NSFileManager defaultManager] copyItemAtPath:app.bundlePath toPath:stagedAppPath error:nil];
 
-    // 3. 智能剪除外围手表/小组件零件 (省 80% 周额度)
     if (strip && !app.isJailbreakLoader) {
         [[NSFileManager defaultManager] removeItemAtPath:[stagedAppPath stringByAppendingPathComponent:@"PlugIns"] error:nil];
         [[NSFileManager defaultManager] removeItemAtPath:[stagedAppPath stringByAppendingPathComponent:@"Watch"] error:nil];
     }
 
-    // 4. 更新 Info.plist 中的 Bundle ID 为与苹果描述文件严格匹配的 ID
     NSString *infoPlistPath = [stagedAppPath stringByAppendingPathComponent:@"Info.plist"];
     NSMutableDictionary *infoDict = [NSMutableDictionary dictionaryWithContentsOfFile:infoPlistPath];
     if (infoDict) {
@@ -358,7 +383,6 @@ typedef int (*MobileInstallationInstallFunc)(CFStringRef path, CFDictionaryRef o
         [infoDict writeToFile:infoPlistPath atomically:YES];
     }
 
-    // 5. 处理 .deb / .dylib 插件注入
     NSMutableArray<NSString *> *dylibRelPaths = [NSMutableArray array];
     if (debOrDylibPaths.count > 0) {
         NSString *frameworksDir = [stagedAppPath stringByAppendingPathComponent:@"Frameworks"];
@@ -373,16 +397,14 @@ typedef int (*MobileInstallationInstallFunc)(CFStringRef path, CFDictionaryRef o
         }
     }
 
-    // 6. 调用 zsign 进行真正的苹果证书签名 (若 zsign 失败直接返回 NO!)
     BOOL zsignOK = [api performRealZSignOnAppBundle:stagedAppPath profileData:realProfileData injectedDylibs:dylibRelPaths error:outError];
     if (!zsignOK) {
         [[NSFileManager defaultManager] removeItemAtPath:stageRoot error:nil];
         NSString *errMsg = (outError && *outError) ? (*outError).localizedDescription : @"zsign 二进制签名未通过";
-        [self appendTimelineLog:[NSString stringWithFormat:@"❌【%@】签名失败：%@", app.appName, errMsg] success:NO];
+        [self appendTimelineLog:[NSString stringWithFormat:@"[ZSIGN-ERR] 【%@】签名失败：%@", app.appName, errMsg] success:NO];
         return NO;
     }
 
-    // 7. 递归赋予 mobile:mobile (501:501) 权限并调用 MobileInstallation 覆盖安装
     [self recursivelyFixInstalldPermissions:stageRoot];
 
     void *miHandle = dlopen("/System/Library/PrivateFrameworks/MobileInstallation.framework/MobileInstallation", RTLD_LAZY);
@@ -401,61 +423,18 @@ typedef int (*MobileInstallationInstallFunc)(CFStringRef path, CFDictionaryRef o
         if (outError) {
             *outError = [NSError errorWithDomain:@"AuraSign" code:installRet userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"系统 installd 安装返回错误码: %d", installRet]}];
         }
-        [self appendTimelineLog:[NSString stringWithFormat:@"❌【%@】系统安装失败 (installd:%d)", app.appName, installRet] success:NO];
+        [self appendTimelineLog:[NSString stringWithFormat:@"[INSTALL-ERR] 【%@】installd 返回: %d", app.appName, installRet] success:NO];
         return NO;
     }
 
-    [self appendTimelineLog:[NSString stringWithFormat:@"✅ 已完成【%@】7天真证书签装 (BundleID:%@, libmis:OK)", app.appName, resolvedBundleID] success:YES];
+    [self appendTimelineLog:[NSString stringWithFormat:@"[SUCCESS] 已完成【%@】7天真证书签装 (BundleID:%@, libmis:OK)", app.appName, resolvedBundleID] success:YES];
     return YES;
 }
 
 - (void)downloadAndSignRepoItem:(AuraRepoAppItem *)item
                        progress:(void(^)(NSString *stageText))progressBlock
                      completion:(void(^)(BOOL success, NSString *message))completion {
-    if (![[AuraAppleDeveloperAPI sharedAPI] hasValidAccountInKeychain]) {
-        if (completion) completion(NO, @"请先在【守护中心】登录绑定您的免费 Apple ID 后再下载签装！");
-        return;
-    }
-    if (!item.downloadURL.length) {
-        if (completion) completion(NO, @"该应用缺少有效的下载直链");
-        return;
-    }
-
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
-        NSString *fastURLStr = [self accelerateURLForMainlandChina:item.downloadURL];
-        dispatch_async(dispatch_get_main_queue(), ^{
-            if (progressBlock) progressBlock([NSString stringWithFormat:@"正在免 VPN 下载\n%@...", item.name]);
-        });
-
-        NSURL *url = [NSURL URLWithString:fastURLStr];
-        [[[NSURLSession sharedSession] downloadTaskWithURL:url completionHandler:^(NSURL *location, NSURLResponse *response, NSError *error) {
-            if (error || !location) {
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    if (completion) completion(NO, [NSString stringWithFormat:@"下载失败：%@", error.localizedDescription ?: @"网络连接异常"]);
-                });
-                return;
-            }
-
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (progressBlock) progressBlock([NSString stringWithFormat:@"下载完成，正在申请苹果7天证书并签装\n%@...", item.name]);
-            });
-
-            NSString *savedIPA = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"%@.ipa", [[NSUUID UUID] UUIDString]]];
-            [[NSFileManager defaultManager] moveItemAtPath:location.path toPath:savedIPA error:nil];
-
-            NSError *signErr = nil;
-            BOOL ok = [self installAndSignIPAFileAtPath:savedIPA customName:nil customBundleID:nil injectedDebs:nil error:&signErr];
-            [[NSFileManager defaultManager] removeItemAtPath:savedIPA error:nil];
-
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (ok) {
-                    if (completion) completion(YES, [NSString stringWithFormat:@"✅【%@ %@】已成功签入 7 天苹果真证书并安装至桌面！", item.name, item.version]);
-                } else {
-                    if (completion) completion(NO, signErr.localizedDescription ?: @"签名安装未通过");
-                }
-            });
-        }] resume];
-    });
+    if (completion) completion(NO, @"商店模块已移除");
 }
 
 - (void)performEmergencyResignAllWithCompletion:(void(^)(BOOL success, NSString *message))completion {
@@ -485,140 +464,19 @@ typedef int (*MobileInstallationInstallFunc)(CFStringRef path, CFDictionaryRef o
     });
 }
 
-#pragma mark - 国内免 VPN 镜像加速与真实开源 Release / JSON 软件源解析
-
 - (NSString *)accelerateURLForMainlandChina:(NSString *)originalURL {
-    if (!originalURL.length) return @"";
-    if ([originalURL hasPrefix:@"https://github.com/"] || [originalURL hasPrefix:@"https://raw.githubusercontent.com/"]) {
-        return [@"https://ghp.ci/" stringByAppendingString:originalURL];
-    }
-    return originalURL;
+    return originalURL ?: @"";
 }
 
 - (NSArray<AuraRepoAppItem *> *)loadBuiltInStoreCatalog {
-    NSMutableArray<AuraRepoAppItem *> *catalog = [NSMutableArray array];
-
-    // 全部配备真实的 GitHub 官方 Release .ipa 下载直链（下载时自动经过国内免 VPN 加速通道）
-    NSArray *officialAndRealOpenSourceApps = @[
-        @{
-            @"name": @"Dopamine 多巴胺官方版",
-            @"ver": @"v3.0.12 (官网最新)",
-            @"bid": @"com.opa334.Dopamine",
-            @"desc": @"官网 ellekit.space 最新版 (iOS 15.0 - 26.0.1) · 免 VPN 直连下载并签入 7 天真证书",
-            @"url": @"https://github.com/opa334/Dopamine/releases/latest/download/Dopamine.ipa",
-            @"jb": @YES
-        },
-        @{
-            @"name": @"Relaxin 官方隐根越狱",
-            @"ver": @"v0.5.6 (官网最新)",
-            @"bid": @"dev.owngoal.relaxin",
-            @"desc": @"官网 relaxin.owngoal.dev 最新版 (原生 RootHide 防检测) · 免 VPN 直连 + 7天真证书签装",
-            @"url": @"https://github.com/owngoal-dev/Relaxin/releases/latest/download/Relaxin.ipa",
-            @"jb": @YES
-        },
-        @{
-            @"name": @"Dopamine (RootHide 隐根版)",
-            @"ver": @"v3.0.12-28 (官网最新)",
-            @"bid": @"com.roothide.Dopamine",
-            @"desc": @"融合 Dopamine 3.0.12 与 RootHide 动态路径防越狱检测 · 免 VPN 高速直连",
-            @"url": @"https://github.com/roothide/Dopamine/releases/latest/download/Dopamine.ipa",
-            @"jb": @YES
-        },
-        @{
-            @"name": @"Delta 全能游戏模拟器",
-            @"ver": @"v1.6.2",
-            @"bid": @"com.rileytestut.Delta",
-            @"desc": @"开源掌机模拟器 (支持 GBA / NDS / N64 / NES) · 真实开源 Release 直链",
-            @"url": @"https://github.com/rileytestut/Delta/releases/latest/download/Delta.ipa",
-            @"jb": @NO
-        },
-        @{
-            @"name": @"RetroArch 跨平台复古游戏机",
-            @"ver": @"v1.19.1",
-            @"bid": @"com.libretro.RetroArch",
-            @"desc": @"支持 PSP / PS1 / 街机等数十种核心 · 免 VPN 镜像直连下载签装",
-            @"url": @"https://github.com/libretro/RetroArch/releases/latest/download/RetroArch.ipa",
-            @"jb": @NO
-        },
-        @{
-            @"name": @"Provenance 综合街机模拟器",
-            @"ver": @"v2.2.0",
-            @"bid": @"org.provenance-emu.provenance",
-            @"desc": @"支持世嘉、索尼、任天堂全系列复古主机，支持外接蓝牙手柄",
-            @"url": @"https://github.com/Provenance-Emu/Provenance/releases/latest/download/Provenance.ipa",
-            @"jb": @NO
-        }
-    ];
-
-    for (NSDictionary *info in officialAndRealOpenSourceApps) {
-        AuraRepoAppItem *item = [[AuraRepoAppItem alloc] init];
-        item.name = info[@"name"];
-        item.version = info[@"ver"];
-        item.bundleID = info[@"bid"];
-        item.summary = info[@"desc"];
-        item.downloadURL = info[@"url"];
-        item.isOfficialJailbreakTool = [info[@"jb"] boolValue];
-        [catalog addObject:item];
-    }
-
-    if (_customRepoItems.count > 0) {
-        [catalog addObjectsFromArray:_customRepoItems];
-    }
-    return catalog;
+    return @[];
 }
 
-// 解析标准 AltStore / Feather / 轻松签 JSON 软件源并加入商店列表
 - (void)addCustomRepoFromURL:(NSString *)repoURLString completion:(void(^)(BOOL success, NSInteger addedCount, NSString *errorMsg))completion {
-    NSString *fastURL = [self accelerateURLForMainlandChina:[repoURLString stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]]];
-    NSURL *url = [NSURL URLWithString:fastURL];
-    if (!url) {
-        if (completion) completion(NO, 0, @"软件源网址格式不正确");
-        return;
-    }
-
-    [[[NSURLSession sharedSession] dataTaskWithURL:url completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
-        if (err || !data.length) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (completion) completion(NO, 0, err.localizedDescription ?: @"无法连接该软件源");
-            });
-            return;
-        }
-        NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL];
-        NSArray *apps = [json isKindOfClass:[NSDictionary class]] ? json[@"apps"] : nil;
-        if (![apps isKindOfClass:[NSArray class]]) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (completion) completion(NO, 0, @"该链接不是有效的 JSON 软件源格式");
-            });
-            return;
-        }
-
-        NSInteger count = 0;
-        for (NSDictionary *appDict in apps) {
-            if (![appDict isKindOfClass:[NSDictionary class]]) continue;
-            NSString *dl = appDict[@"downloadURL"];
-            if (!dl.length && [appDict[@"versions"] isKindOfClass:[NSArray class]] && [appDict[@"versions"] count] > 0) {
-                dl = appDict[@"versions"][0][@"downloadURL"];
-            }
-            if (!dl.length) continue;
-
-            AuraRepoAppItem *item = [[AuraRepoAppItem alloc] init];
-            item.name = appDict[@"name"] ?: @"未命名应用";
-            item.version = appDict[@"version"] ?: ([appDict[@"versions"] count] > 0 ? appDict[@"versions"][0][@"version"] : @"1.0");
-            item.bundleID = appDict[@"bundleIdentifier"] ?: @"com.repo.app";
-            item.summary = appDict[@"localizedDescription"] ?: appDict[@"subtitle"] ?: @"来自自定义软件源";
-            item.downloadURL = dl;
-            item.isOfficialJailbreakTool = NO;
-            [_customRepoItems addObject:item];
-            count++;
-        }
-
-        dispatch_async(dispatch_get_main_queue(), ^{
-            if (completion) completion(YES, count, nil);
-        });
-    }] resume];
+    if (completion) completion(NO, 0, nil);
 }
 
-#pragma mark - 时间轴日志读写
+#pragma mark - 深度诊断日志系统 (记录最多 100 条完整上下文日志)
 
 - (NSString *)logFilePath {
     return AURA_NS_JBROOT(@"/var/mobile/Library/AuraSignPro/timeline.plist");
@@ -629,17 +487,19 @@ typedef int (*MobileInstallationInstallFunc)(CFStringRef path, CFDictionaryRef o
 }
 
 - (void)appendTimelineLog:(NSString *)event success:(BOOL)success {
-    NSMutableArray *logs = [[self readAuditTimelineLogs] mutableCopy];
-    NSDateFormatter *df = [[NSDateFormatter alloc] init];
-    df.dateFormat = @"MM-dd HH:mm:ss";
-    [logs insertObject:@{
-        @"time": [df stringFromDate:[NSDate date]],
-        @"event": event ?: @"",
-        @"success": @(success)
-    } atIndex:0];
-    if (logs.count > 50) [logs removeLastObject];
-    [[NSFileManager defaultManager] createDirectoryAtPath:[[self logFilePath] stringByDeletingLastPathComponent] withIntermediateDirectories:YES attributes:nil error:nil];
-    [logs writeToFile:[self logFilePath] atomically:YES];
+    @synchronized (self) {
+        NSMutableArray *logs = [[self readAuditTimelineLogs] mutableCopy];
+        NSDateFormatter *df = [[NSDateFormatter alloc] init];
+        df.dateFormat = @"MM-dd HH:mm:ss";
+        [logs insertObject:@{
+            @"time": [df stringFromDate:[NSDate date]],
+            @"event": event ?: @"",
+            @"success": @(success)
+        } atIndex:0];
+        if (logs.count > 100) [logs removeLastObject];
+        [[NSFileManager defaultManager] createDirectoryAtPath:[[self logFilePath] stringByDeletingLastPathComponent] withIntermediateDirectories:YES attributes:nil error:nil];
+        [logs writeToFile:[self logFilePath] atomically:YES];
+    }
 }
 
 @end

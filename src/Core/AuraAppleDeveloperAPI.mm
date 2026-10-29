@@ -1,4 +1,4 @@
-// src/Core/AuraAppleDeveloperAPI.mm
+// src/Core/AuraAppleDeveloperAPI.mm (带全链路深度诊断日志完整版)
 #import <CoreFoundation/CoreFoundation.h>
 #import <UIKit/UIKit.h>
 #import "AuraAppleDeveloperAPI.h"
@@ -49,7 +49,6 @@ typedef int (*CTServerConnectionSetCellularUsagePolicyFunc)(CFTypeRef, CFStringR
     return self;
 }
 
-// 【关键修复】：自动调用 CoreTelephony 为 com.aurasign.pro 解锁国行 iPhone 的无线局域网与蜂窝数据权限！
 - (void)unlockMainlandChinaNetworkPermission {
     void *ctHandle = dlopen("/System/Library/Frameworks/CoreTelephony.framework/CoreTelephony", RTLD_LAZY);
     if (!ctHandle) return;
@@ -190,7 +189,7 @@ typedef int (*CTServerConnectionSetCellularUsagePolicyFunc)(CFTypeRef, CFStringR
     return (r1 == 0 && r2 == 0 && [[NSFileManager defaultManager] fileExistsAtPath:p12Path]);
 }
 
-#pragma mark - 苹果 QH65B2 开发者中心请求（配备自动解锁联网 + CFNetwork 底层通道）
+#pragma mark - 苹果 QH65B2 开发者请求 + 完整请求头与响应诊断日志
 
 - (NSDictionary *)sendQH65B2Request:(NSString *)actionPath
                            bodyDict:(NSDictionary *)bodyDict
@@ -224,6 +223,14 @@ typedef int (*CTServerConnectionSetCellularUsagePolicyFunc)(CFTypeRef, CFStringR
     [req setValue:@"text/x-xml-plist" forHTTPHeaderField:@"Content-Type"];
     [req setValue:@"text/x-xml-plist" forHTTPHeaderField:@"Accept"];
 
+    // 写入发送前请求头诊断日志
+    [[AuraSignEngine sharedEngine] appendTimelineLog:[NSString stringWithFormat:@"[QH65B2-REQ] %@ | ADSID=%@ | TokenLen=%lu | MD=%@ | UDID=%@",
+        actionPath,
+        session[@"adsid"] ?: @"空",
+        (unsigned long)[session[@"xcodeToken"] length],
+        anisette[@"X-Apple-I-MD"] ? @"有" : @"缺失!",
+        udid.length ? @"有" : @"缺失!"] success:YES];
+
     NSMutableDictionary *fullBody = [NSMutableDictionary dictionaryWithDictionary:bodyDict ?: @{}];
     fullBody[@"clientId"] = @"XABBG36SBA";
     fullBody[@"protocolVersion"] = @"QH65B2";
@@ -231,7 +238,6 @@ typedef int (*CTServerConnectionSetCellularUsagePolicyFunc)(CFTypeRef, CFStringR
     NSData *xmlBodyData = [NSPropertyListSerialization dataWithPropertyList:fullBody format:NSPropertyListXMLFormat_v1_0 options:0 error:NULL];
     req.HTTPBody = xmlBodyData;
 
-    // 使用独立 Ephemeral Session 并关闭 waitsForConnectivity，避免国行 symptomd 误判离线
     NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration ephemeralSessionConfiguration];
     cfg.allowsCellularAccess = YES;
     cfg.waitsForConnectivity = NO;
@@ -239,9 +245,13 @@ typedef int (*CTServerConnectionSetCellularUsagePolicyFunc)(CFTypeRef, CFStringR
 
     __block NSDictionary *respDict = nil;
     __block NSError *netErr = nil;
+    __block NSInteger httpCode = 0;
     dispatch_semaphore_t sem = dispatch_semaphore_create(0);
     [[customSession dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
         netErr = err;
+        if ([resp isKindOfClass:[NSHTTPURLResponse class]]) {
+            httpCode = [(NSHTTPURLResponse *)resp statusCode];
+        }
         if (data.length) {
             id obj = [NSPropertyListSerialization propertyListWithData:data options:0 format:NULL error:NULL];
             if ([obj isKindOfClass:[NSDictionary class]]) respDict = obj;
@@ -250,7 +260,6 @@ typedef int (*CTServerConnectionSetCellularUsagePolicyFunc)(CFTypeRef, CFStringR
     }] resume];
     dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 20 * NSEC_PER_SEC));
 
-    // 若国行系统仍然拦截 NSURLSession 报 -1009 (offline)，自动使用 openssl s_client / curl 命令行通道绕过系统 App 防火墙！
     if (netErr && !respDict) {
         NSString *curlBin = [self findBinaryNamed:@"curl"];
         if ([[NSFileManager defaultManager] fileExistsAtPath:curlBin]) {
@@ -274,6 +283,7 @@ typedef int (*CTServerConnectionSetCellularUsagePolicyFunc)(CFTypeRef, CFStringR
                     if ([obj isKindOfClass:[NSDictionary class]]) {
                         respDict = obj;
                         netErr = nil;
+                        httpCode = 200;
                     }
                 }
             }
@@ -283,13 +293,19 @@ typedef int (*CTServerConnectionSetCellularUsagePolicyFunc)(CFTypeRef, CFStringR
     }
 
     if (netErr && outError) {
-        *outError = [NSError errorWithDomain:@"AuraSign" code:netErr.code userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"网络请求被系统拦截 (%ld): 请在系统「设置 -> 无线局域网 -> 使用无线局域网与蜂窝移动网的应用」中允许【灵签 Pro】联网，或重启一次越狱环境", (long)netErr.code]}];
+        [[AuraSignEngine sharedEngine] appendTimelineLog:[NSString stringWithFormat:@"[QH65B2-NETERR] %@ 失败: %@", actionPath, netErr.localizedDescription] success:NO];
+        *outError = [NSError errorWithDomain:@"AuraSign" code:netErr.code userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"网络错误 (%ld): %@", (long)netErr.code, netErr.localizedDescription]}];
         return nil;
     }
 
     NSInteger resultCode = [respDict[@"resultCode"] integerValue];
+    NSString *rawResultStr = respDict[@"resultString"] ?: @"";
+    NSString *rawUserStr   = respDict[@"userString"] ?: @"";
+    [[AuraSignEngine sharedEngine] appendTimelineLog:[NSString stringWithFormat:@"[QH65B2-RESP] %@ | HTTP=%ld | resultCode=%ld | resultString=%@ | userString=%@",
+        actionPath, (long)httpCode, (long)resultCode, rawResultStr, rawUserStr] success:(resultCode == 0)];
+
     if (resultCode != 0 && outError) {
-        NSString *appleMsg = respDict[@"userString"] ?: respDict[@"resultString"] ?: @"未知苹果接口错误";
+        NSString *appleMsg = rawUserStr.length ? rawUserStr : (rawResultStr.length ? rawResultStr : @"未知苹果接口错误");
         NSString *cnReason = [self translateAppleErrorCode:resultCode rawMessage:appleMsg];
         *outError = [NSError errorWithDomain:@"AuraApplePortal" code:resultCode userInfo:@{NSLocalizedDescriptionKey: cnReason}];
     }
@@ -297,12 +313,14 @@ typedef int (*CTServerConnectionSetCellularUsagePolicyFunc)(CFTypeRef, CFStringR
 }
 
 - (NSString *)translateAppleErrorCode:(NSInteger)code rawMessage:(NSString *)raw {
-    if (code == 1100) return @"苹果会话令牌未通过校验 (1100)，请确认账号密码正确并完成双重认证";
+    if (code == 1100) return [NSString stringWithFormat:@"苹果会话令牌未通过校验 (1100: %@)\n请点击下方【📋 复制诊断日志】发给开发者定位原因", raw];
     if (code == 7460) return @"该账号在其他电脑上生成的证书已满 (7460)，正在自动为您吊销旧证书并重新签发...";
     if (code == 9401) return @"该软件标识符已被占用 (9401)，正在自动附加您的专属 TeamID 后缀...";
     if (code == 9427) return @"本周免费账号的 10 个 App ID 注册额度已满 (9427)，请等待满 7 天自动释放或换用其他免费小号";
     return [NSString stringWithFormat:@"苹果服务器返回 (%ld): %@", (long)code, raw];
 }
+
+#pragma mark - 认证并记录 AuthKit 全部返回结构
 
 - (void)authenticateWithSystemSheetFromViewController:(UIViewController *)presentingVC
                                          initialEmail:(NSString *)email
@@ -315,6 +333,8 @@ typedef int (*CTServerConnectionSetCellularUsagePolicyFunc)(CFTypeRef, CFStringR
 
     Class inAppCtxClass = NSClassFromString(@"AKAppleIDAuthenticationInAppContext") ?: NSClassFromString(@"AKAppleIDAuthenticationContext");
     Class ctrlClass = NSClassFromString(@"AKAppleIDAuthenticationController");
+
+    [[AuraSignEngine sharedEngine] appendTimelineLog:[NSString stringWithFormat:@"[LOGIN-START] 开始认证账号: %@, ctxClass=%@", email, inAppCtxClass] success:YES];
 
     if (!inAppCtxClass || !ctrlClass) {
         if (completion) completion(NO, @"系统 AuthKit 组件加载失败");
@@ -347,17 +367,35 @@ typedef int (*CTServerConnectionSetCellularUsagePolicyFunc)(CFTypeRef, CFStringR
         if (presentingVC && [ctx respondsToSelector:@selector(setPresentingViewController:)]) {
             [ctx setPresentingViewController:presentingVC];
         }
-    } @catch (NSException *ex) {}
+    } @catch (NSException *ex) {
+        [[AuraSignEngine sharedEngine] appendTimelineLog:[NSString stringWithFormat:@"[AUTHKIT-EX] 设置 Context 异常: %@", ex.reason] success:NO];
+    }
 
     id ctrl = [[ctrlClass alloc] init];
     [ctrl authenticateWithContext:ctx completion:^(NSDictionary *results, NSError *authError) {
         if (authError || !results) {
+            [[AuraSignEngine sharedEngine] appendTimelineLog:[NSString stringWithFormat:@"[AUTHKIT-ERR] 认证失败: code=%ld, domain=%@, desc=%@",
+                (long)authError.code, authError.domain, authError.localizedDescription] success:NO];
             dispatch_async(dispatch_get_main_queue(), ^{
                 NSString *errStr = authError.localizedDescription ?: @"用户取消或认证未通过";
                 if (completion) completion(NO, [NSString stringWithFormat:@"Apple ID 认证未通过：%@", errStr]);
             });
             return;
         }
+
+        // 详细记录 results 字典中每一个 Key 的名字和值的类型（脱敏处理，不记录明文密码）
+        NSMutableArray *keySummary = [NSMutableArray array];
+        [results enumerateKeysAndObjectsUsingBlock:^(id k, id v, BOOL *stop) {
+            if ([v isKindOfClass:[NSDictionary class]]) {
+                NSDictionary *sub = (NSDictionary *)v;
+                [keySummary addObject:[NSString stringWithFormat:@"%@(Dict:%@)", k, [sub.allKeys componentsJoinedByString:@"|"]]];
+            } else if ([v isKindOfClass:[NSString class]]) {
+                [keySummary addObject:[NSString stringWithFormat:@"%@(StrLen:%lu)", k, (unsigned long)[(NSString *)v length]]];
+            } else {
+                [keySummary addObject:[NSString stringWithFormat:@"%@(%@)", k, NSStringFromClass([v class])]];
+            }
+        }];
+        [[AuraSignEngine sharedEngine] appendTimelineLog:[NSString stringWithFormat:@"[AUTHKIT-OK] 返回结构: %@", [keySummary componentsJoinedByString:@", "]] success:YES];
 
         NSString * __strong *kAltDSIDPtr = akHandle ? (NSString * __strong *)dlsym(akHandle, "AKAuthenticationAlternateDSIDKey") : NULL;
         NSString * __strong *kDSIDPtr    = akHandle ? (NSString * __strong *)dlsym(akHandle, "AKAuthenticationDSIDKey") : NULL;
@@ -374,16 +412,25 @@ typedef int (*CTServerConnectionSetCellularUsagePolicyFunc)(CFTypeRef, CFStringR
         if (!adsid.length) adsid = results[@"AKDSID"] ?: results[@"dsid"] ?: @"";
 
         NSString *xcodeToken = nil;
+        NSString *tokenSource = @"未知";
         id rawIdmsObj = (kIdmsPtr && *kIdmsPtr) ? results[*kIdmsPtr] : nil;
         if (!rawIdmsObj) rawIdmsObj = results[@"AKIdmsToken"] ?: results[@"idmsToken"] ?: results[@"AKTokens"] ?: results[@"tokens"];
 
         if ([rawIdmsObj isKindOfClass:[NSDictionary class]]) {
             NSDictionary *tokenDict = (NSDictionary *)rawIdmsObj;
-            xcodeToken = tokenDict[@"com.apple.gs.xcode.auth"]
-                      ?: tokenDict[@"com.apple.gs.idms.auth"]
-                      ?: [tokenDict allValues].firstObject;
+            if (tokenDict[@"com.apple.gs.xcode.auth"]) {
+                xcodeToken = tokenDict[@"com.apple.gs.xcode.auth"];
+                tokenSource = @"IdmsDict[xcode.auth]";
+            } else if (tokenDict[@"com.apple.gs.idms.auth"]) {
+                xcodeToken = tokenDict[@"com.apple.gs.idms.auth"];
+                tokenSource = @"IdmsDict[idms.auth]";
+            } else {
+                xcodeToken = [tokenDict allValues].firstObject;
+                tokenSource = [NSString stringWithFormat:@"IdmsDict[%@]", [tokenDict allKeys].firstObject];
+            }
         } else if ([rawIdmsObj isKindOfClass:[NSString class]]) {
             xcodeToken = (NSString *)rawIdmsObj;
+            tokenSource = @"IdmsString";
         }
 
         if (![xcodeToken isKindOfClass:[NSString class]] || xcodeToken.length == 0) {
@@ -391,14 +438,19 @@ typedef int (*CTServerConnectionSetCellularUsagePolicyFunc)(CFTypeRef, CFStringR
             id passObj   = (kPassPtr && *kPassPtr) ? results[*kPassPtr] : (results[@"AKPassword"] ?: results[@"password"]);
             if ([masterObj isKindOfClass:[NSString class]] && [masterObj length] > 0) {
                 xcodeToken = masterObj;
+                tokenSource = @"AKMasterToken";
             } else if ([passObj isKindOfClass:[NSString class]] && [passObj length] > 0) {
                 xcodeToken = passObj;
+                tokenSource = @"AKPassword(PET)";
             }
         }
 
+        [[AuraSignEngine sharedEngine] appendTimelineLog:[NSString stringWithFormat:@"[TOKEN-PICK] Token来源=%@, 长度=%lu, ADSID=%@",
+            tokenSource, (unsigned long)xcodeToken.length, adsid] success:(xcodeToken.length > 0)];
+
         if (![xcodeToken isKindOfClass:[NSString class]] || xcodeToken.length == 0) {
             dispatch_async(dispatch_get_main_queue(), ^{
-                if (completion) completion(NO, @"认证已返回但未包含有效开发者令牌");
+                if (completion) completion(NO, @"认证已返回但未包含有效开发者令牌，请点击复制诊断日志查看详情");
             });
             return;
         }
@@ -466,7 +518,7 @@ typedef int (*CTServerConnectionSetCellularUsagePolicyFunc)(CFTypeRef, CFStringR
             }
 
             [sess writeToFile:[self sessionFilePath] atomically:YES];
-            [[AuraSignEngine sharedEngine] appendTimelineLog:[NSString stringWithFormat:@"✅ 已绑定 Apple ID: %@ (TeamID: %@)", realEmail, teamId] success:YES];
+            [[AuraSignEngine sharedEngine] appendTimelineLog:[NSString stringWithFormat:@"[LOGIN-SUCCESS] 已绑定 Apple ID: %@ (TeamID: %@)", realEmail, teamId] success:YES];
 
             dispatch_async(dispatch_get_main_queue(), ^{
                 if (completion) completion(YES, nil);

@@ -70,13 +70,15 @@
     _topHeaderBar.frame = CGRectMake(0, safeTop, width, 56.0);
     _topRightActionButton.frame = CGRectMake(width - 104.0, 11.0, 88.0, 34.0);
 
-    CGFloat tableTop = safeTop + 56.0;
-    _tableView.frame = CGRectMake(0, tableTop, width, height - tableTop);
-    _tableView.contentInset = UIEdgeInsetsMake(4, 0, safeBottom + 105.0, 0);
-
-    // 底部悬浮胶囊导航栏（2 栏对分，干净利落）
     CGFloat pillW = width - 48.0;
-    _bottomLiquidPillBar.frame = CGRectMake(24.0, height - safeBottom - 64.0, pillW, 58.0);
+    CGFloat pillY = height - safeBottom - 62.0;
+    _bottomLiquidPillBar.frame = CGRectMake(24.0, pillY, pillW, 58.0);
+
+    // 列表底部严格停在悬浮胶囊栏上方 8pt 处，绝不穿模到底部白条下！
+    CGFloat tableTop = safeTop + 56.0;
+    _tableView.frame = CGRectMake(0, tableTop, width, pillY - tableTop - 8.0);
+    _tableView.contentInset = UIEdgeInsetsMake(4, 0, 16.0, 0);
+
     CGFloat btnW = pillW / 2.0;
     _tabActiveIndicator.frame = CGRectMake(_currentTab * btnW + 6.0, 6.0, btnW - 12.0, 46.0);
     for (int i = 0; i < 2; i++) {
@@ -677,20 +679,7 @@
     }
 }
 
-- (void)showTimelineLogsAlert {
-    NSArray<NSDictionary *> *logs = [[AuraSignEngine sharedEngine] readAuditTimelineLogs];
-    NSMutableString *msg = [NSMutableString string];
-    if (logs.count == 0) {
-        [msg appendString:@"暂无后台续签记录"];
-    } else {
-        for (NSDictionary *entry in logs) {
-            [msg appendFormat:@"[%@] %@\n\n", entry[@"time"], entry[@"event"]];
-        }
-    }
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"📜 后台续签时间轴日志" message:msg preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
-    [self presentViewController:alert animated:YES completion:nil];
-}
+
 
 - (void)showCloneAppPrompt {
     if (_installedApps.count == 0) {
@@ -742,9 +731,49 @@
     [_tableView reloadData];
 }
 
+- (NSString *)buildFullDiagnosticReportString {
+    NSMutableString *report = [NSMutableString string];
+    [report appendFormat:@"=== AuraSign Pro 深度诊断报告 ===\n"];
+    [report appendFormat:@"iOS版本: %@\n", [[UIDevice currentDevice] systemVersion]];
+    [report appendFormat:@"越狱目录: %@\n", AURA_NS_JBROOT(@"/")];
+    [report appendFormat:@"UDID获取: %@\n", [[AuraAppleDeveloperAPI sharedAPI] realDeviceUDID].length ? @"成功" : @"空"];
+    [report appendFormat:@"--------------------------------\n"];
+
+    NSArray<NSDictionary *> *logs = [[AuraSignEngine sharedEngine] readAuditTimelineLogs];
+    if (logs.count == 0) {
+        [report appendString:@"(暂无运行日志记录)\n"];
+    } else {
+        for (NSDictionary *entry in logs) {
+            [report appendFormat:@"[%@] %@\n", entry[@"time"], entry[@"event"]];
+        }
+    }
+    return report;
+}
+
+- (void)showTimelineLogsAlert {
+    NSString *fullReport = [self buildFullDiagnosticReportString];
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"📜 深度诊断日志控制台"
+                                                                   message:fullReport
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"📋 一键复制全部日志" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        [UIPasteboard generalPasteboard].string = fullReport;
+    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"🗑️ 清空日志" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
+        NSString *logPath = AURA_NS_JBROOT(@"/var/mobile/Library/AuraSignPro/timeline.plist");
+        [[NSFileManager defaultManager] removeItemAtPath:logPath error:nil];
+    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"关闭" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
 - (void)showResultAlertWithTitle:(NSString *)title message:(NSString *)message {
     UIAlertController *a = [UIAlertController alertControllerWithTitle:title message:message preferredStyle:UIAlertControllerStyleAlert];
-    [a addAction:[UIAlertAction actionWithTitle:@"知道了" style:UIAlertActionStyleDefault handler:nil]];
+    if ([title containsString:@"❌"] || [title containsString:@"⚠️"]) {
+        [a addAction:[UIAlertAction actionWithTitle:@"📋 复制详细诊断日志" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+            [UIPasteboard generalPasteboard].string = [self buildFullDiagnosticReportString];
+        }]];
+    }
+    [a addAction:[UIAlertAction actionWithTitle:@"知道了" style:UIAlertActionStyleCancel handler:nil]];
     [self presentViewController:a animated:YES completion:nil];
 }
 
