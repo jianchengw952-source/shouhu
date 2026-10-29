@@ -547,11 +547,11 @@
 }
 
 - (void)onAppleIDLoginButtonTapped {
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"👤 绑定个人免费 Apple ID"
-                                                                   message:@"输入您的 Apple ID 与密码后，系统将自动调起苹果双重认证（2FA）并向苹果开发者服务器申请 1 年期真证书。"
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"👤 第 1 步：登录 Apple ID"
+                                                                   message:@"请输入您的个人免费 Apple ID 与密码。若您的账号开启了双重认证，点击下一步后手机屏幕将弹出 6 位验证码。"
                                                             preferredStyle:UIAlertControllerStyleAlert];
     [alert addTextFieldWithConfigurationHandler:^(UITextField *tf) {
-        tf.placeholder = @"Apple ID 邮箱 (如 xxx@icloud.com)";
+        tf.placeholder = @"Apple ID 邮箱 (如 571322016@qq.com)";
         tf.keyboardType = UIKeyboardTypeEmailAddress;
         tf.autocorrectionType = UITextAutocorrectionTypeNo;
     }];
@@ -560,25 +560,25 @@
         tf.secureTextEntry = YES;
     }];
 
-    [alert addAction:[UIAlertAction actionWithTitle:@"登录并获取双重认证" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+    [alert addAction:[UIAlertAction actionWithTitle:@"下一步" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
         NSString *email = [alert.textFields[0].text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
         NSString *pass  = alert.textFields[1].text ?: @"";
-        if (!email.length) {
-            [self showResultAlertWithTitle:@"提示" message:@"请输入您的 Apple ID 邮箱"];
+        if (!email.length || !pass.length) {
+            [self showResultAlertWithTitle:@"提示" message:@"请输入完整的 Apple ID 邮箱与密码"];
             return;
         }
-        [self showLoadingHUD:@"正在连接苹果认证服务并申请证书..."];
-        [[AuraAppleDeveloperAPI sharedAPI] authenticateWithSystemSheetFromViewController:self
-                                                                            initialEmail:email
-                                                                         initialPassword:pass
-                                                                              completion:^(BOOL success, NSString *errorMsg) {
+        [self showLoadingHUD:@"正在向苹果 GSA 发起加密握手..."];
+        [[AuraAppleDeveloperAPI sharedAPI] loginWithAppleID:email password:pass twoFactorCode:nil completion:^(BOOL success, BOOL need2FA, NSString *errorMsg) {
             [self hideLoadingHUD];
             [self reloadAllDataAsync];
             if (success) {
-                [self showResultAlertWithTitle:@"✅ 绑定成功"
-                                       message:[NSString stringWithFormat:@"已成功获取苹果 TeamID (%@) 并生成 1 年期开发证书！现在您可以直接点击应用右侧的【立即修复/续签】。", [[AuraAppleDeveloperAPI sharedAPI] currentTeamID]]];
+                [self showResultAlertWithTitle:@"🎉 绑定成功"
+                                       message:[NSString stringWithFormat:@"已成功获取苹果 TeamID (%@) 并签发 1 年期真证书！现在您可以直接点击应用右侧的【立即修复/续签】。", [[AuraAppleDeveloperAPI sharedAPI] currentTeamID]]];
+            } else if (need2FA) {
+                // 自动进入第 2 步：弹出 6 位双重认证码输入窗口！
+                [self showStep2TwoFactorPromptWithEmail:email password:pass];
             } else {
-                [self showResultAlertWithTitle:@"❌ 绑定未通过" message:(errorMsg ?: @"请检查账号密码重试")];
+                [self showResultAlertWithTitle:@"❌ 登录未通过" message:(errorMsg ?: @"请查看诊断日志")];
             }
         }];
     }]];
@@ -590,6 +590,38 @@
         }]];
     }
 
+    [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)showStep2TwoFactorPromptWithEmail:(NSString *)email password:(NSString *)password {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"🔐 第 2 步：输入 6 位双重认证码"
+                                                                   message:@"苹果已向您的手机推送双重认证弹窗，请点击系统弹窗上的「允许」，并将显示的 6 位数字验证码填入下方："
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+        tf.placeholder = @"6 位数字验证码";
+        tf.keyboardType = UIKeyboardTypeNumberPad;
+        tf.textAlignment = NSTextAlignmentCenter;
+    }];
+
+    [alert addAction:[UIAlertAction actionWithTitle:@"验证并生成 1 年真证书" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        NSString *code = [alert.textFields[0].text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (code.length != 6) {
+            [self showResultAlertWithTitle:@"提示" message:@"请输入完整的 6 位数字验证码"];
+            return;
+        }
+        [self showLoadingHUD:@"正在兑换 Xcode 开发者令牌并签发证书..."];
+        [[AuraAppleDeveloperAPI sharedAPI] loginWithAppleID:email password:password twoFactorCode:code completion:^(BOOL success, BOOL need2FA, NSString *errorMsg) {
+            [self hideLoadingHUD];
+            [self reloadAllDataAsync];
+            if (success) {
+                [self showResultAlertWithTitle:@"🎉 绑定成功"
+                                       message:[NSString stringWithFormat:@"已成功获取苹果 TeamID (%@) 并签发 1 年期真证书！现在您可以直接点击应用右侧的【立即修复/续签】。", [[AuraAppleDeveloperAPI sharedAPI] currentTeamID]]];
+            } else {
+                [self showResultAlertWithTitle:@"❌ 验证未通过" message:(errorMsg ?: @"请点击复制诊断日志查看详情")];
+            }
+        }];
+    }]];
     [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
     [self presentViewController:alert animated:YES completion:nil];
 }
