@@ -16,6 +16,8 @@ extern char **environ;
 #endif
 
 typedef CFPropertyListRef (*MGCopyAnswerFunc)(CFStringRef property);
+typedef CFTypeRef (*CTServerConnectionCreateFunc)(CFAllocatorRef, void *, void *);
+typedef int (*CTServerConnectionSetCellularUsagePolicyFunc)(CFTypeRef, CFStringRef, CFDictionaryRef);
 
 @interface NSObject (AuraAuthKitRealAPI)
 - (void)setUsername:(NSString *)username;
@@ -38,6 +40,34 @@ typedef CFPropertyListRef (*MGCopyAnswerFunc)(CFStringRef property);
         api = [[AuraAppleDeveloperAPI alloc] init];
     });
     return api;
+}
+
+- (instancetype)init {
+    if (self = [super init]) {
+        [self unlockMainlandChinaNetworkPermission];
+    }
+    return self;
+}
+
+// 【关键修复】：自动调用 CoreTelephony 为 com.aurasign.pro 解锁国行 iPhone 的无线局域网与蜂窝数据权限！
+- (void)unlockMainlandChinaNetworkPermission {
+    void *ctHandle = dlopen("/System/Library/Frameworks/CoreTelephony.framework/CoreTelephony", RTLD_LAZY);
+    if (!ctHandle) return;
+
+    CTServerConnectionCreateFunc createConn = (CTServerConnectionCreateFunc)dlsym(ctHandle, "_CTServerConnectionCreate");
+    CTServerConnectionSetCellularUsagePolicyFunc setPolicy = (CTServerConnectionSetCellularUsagePolicyFunc)dlsym(ctHandle, "_CTServerConnectionSetCellularUsagePolicy");
+
+    if (createConn && setPolicy) {
+        CFTypeRef conn = createConn(kCFAllocatorDefault, NULL, NULL);
+        if (conn) {
+            NSDictionary *policy = @{
+                @"kCTCellularDataUsagePolicy": @"kCTCellularDataUsagePolicyAlwaysAllow",
+                @"kCTWiFiDataUsagePolicy": @"kCTCellularDataUsagePolicyAlwaysAllow"
+            };
+            setPolicy(conn, CFSTR("com.aurasign.pro"), (__bridge CFDictionaryRef)policy);
+            CFRelease(conn);
+        }
+    }
 }
 
 - (NSString *)keychainDir {
@@ -160,15 +190,20 @@ typedef CFPropertyListRef (*MGCopyAnswerFunc)(CFStringRef property);
     return (r1 == 0 && r2 == 0 && [[NSFileManager defaultManager] fileExistsAtPath:p12Path]);
 }
 
+#pragma mark - 苹果 QH65B2 开发者中心请求（配备自动解锁联网 + CFNetwork 底层通道）
+
 - (NSDictionary *)sendQH65B2Request:(NSString *)actionPath
                            bodyDict:(NSDictionary *)bodyDict
                             session:(NSDictionary *)session
                            outError:(NSError **)outError {
+    [self unlockMainlandChinaNetworkPermission];
+
     NSString *urlStr = [NSString stringWithFormat:@"https://developerservices2.apple.com/QH65B2/ios/%@?clientId=XABBG36SBA", actionPath];
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:urlStr]
                                                        cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
                                                    timeoutInterval:20.0];
     req.HTTPMethod = @"POST";
+    req.allowsCellularAccess = YES;
 
     NSDictionary *anisette = [[AuraSignEngine sharedEngine] fetchNativeAnisetteHeaders];
     [anisette enumerateKeysAndObjectsUsingBlock:^(NSString *k, NSString *v, BOOL *stop) {
@@ -193,12 +228,19 @@ typedef CFPropertyListRef (*MGCopyAnswerFunc)(CFStringRef property);
     fullBody[@"clientId"] = @"XABBG36SBA";
     fullBody[@"protocolVersion"] = @"QH65B2";
     fullBody[@"requestId"] = [[NSUUID UUID] UUIDString];
-    req.HTTPBody = [NSPropertyListSerialization dataWithPropertyList:fullBody format:NSPropertyListXMLFormat_v1_0 options:0 error:NULL];
+    NSData *xmlBodyData = [NSPropertyListSerialization dataWithPropertyList:fullBody format:NSPropertyListXMLFormat_v1_0 options:0 error:NULL];
+    req.HTTPBody = xmlBodyData;
+
+    // 使用独立 Ephemeral Session 并关闭 waitsForConnectivity，避免国行 symptomd 误判离线
+    NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration ephemeralSessionConfiguration];
+    cfg.allowsCellularAccess = YES;
+    cfg.waitsForConnectivity = NO;
+    NSURLSession *customSession = [NSURLSession sessionWithConfiguration:cfg];
 
     __block NSDictionary *respDict = nil;
     __block NSError *netErr = nil;
     dispatch_semaphore_t sem = dispatch_semaphore_create(0);
-    [[[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+    [[customSession dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
         netErr = err;
         if (data.length) {
             id obj = [NSPropertyListSerialization propertyListWithData:data options:0 format:NULL error:NULL];
@@ -208,8 +250,40 @@ typedef CFPropertyListRef (*MGCopyAnswerFunc)(CFStringRef property);
     }] resume];
     dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 20 * NSEC_PER_SEC));
 
+    // 若国行系统仍然拦截 NSURLSession 报 -1009 (offline)，自动使用 openssl s_client / curl 命令行通道绕过系统 App 防火墙！
+    if (netErr && !respDict) {
+        NSString *curlBin = [self findBinaryNamed:@"curl"];
+        if ([[NSFileManager defaultManager] fileExistsAtPath:curlBin]) {
+            NSString *reqFile = [NSTemporaryDirectory() stringByAppendingPathComponent:@"aura_req.plist"];
+            NSString *respFile = [NSTemporaryDirectory() stringByAppendingPathComponent:@"aura_resp.plist"];
+            [xmlBodyData writeToFile:reqFile atomically:YES];
+
+            NSMutableArray *curlArgs = [NSMutableArray arrayWithObjects:@"-s", @"-k", @"-X", @"POST", urlStr,
+                                        @"-H", @"Content-Type: text/x-xml-plist",
+                                        @"-H", @"User-Agent: Xcode",
+                                        @"-H", @"X-Xcode-Version: 15.2 (15C500b)", nil];
+            [req.allHTTPHeaderFields enumerateKeysAndObjectsUsingBlock:^(NSString *k, NSString *v, BOOL *stop) {
+                [curlArgs addObjectsFromArray:@[@"-H", [NSString stringWithFormat:@"%@: %@", k, v]]];
+            }];
+            [curlArgs addObjectsFromArray:@[@"--data-binary", [NSString stringWithFormat:@"@%@", reqFile], @"-o", respFile]];
+
+            if ([self runProcess:curlBin args:curlArgs] == 0) {
+                NSData *curlData = [NSData dataWithContentsOfFile:respFile];
+                if (curlData.length) {
+                    id obj = [NSPropertyListSerialization propertyListWithData:curlData options:0 format:NULL error:NULL];
+                    if ([obj isKindOfClass:[NSDictionary class]]) {
+                        respDict = obj;
+                        netErr = nil;
+                    }
+                }
+            }
+            [[NSFileManager defaultManager] removeItemAtPath:reqFile error:nil];
+            [[NSFileManager defaultManager] removeItemAtPath:respFile error:nil];
+        }
+    }
+
     if (netErr && outError) {
-        *outError = [NSError errorWithDomain:@"AuraSign" code:netErr.code userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"网络请求失败: %@", netErr.localizedDescription]}];
+        *outError = [NSError errorWithDomain:@"AuraSign" code:netErr.code userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"网络请求被系统拦截 (%ld): 请在系统「设置 -> 无线局域网 -> 使用无线局域网与蜂窝移动网的应用」中允许【灵签 Pro】联网，或重启一次越狱环境", (long)netErr.code]}];
         return nil;
     }
 
@@ -230,13 +304,12 @@ typedef CFPropertyListRef (*MGCopyAnswerFunc)(CFStringRef property);
     return [NSString stringWithFormat:@"苹果服务器返回 (%ld): %@", (long)code, raw];
 }
 
-#pragma mark - 【关键修复】：正确解析 AuthKit 返回字典中的 AKIdmsToken (NSDictionary / NSString) 与 ADSID
-
 - (void)authenticateWithSystemSheetFromViewController:(UIViewController *)presentingVC
                                          initialEmail:(NSString *)email
                                       initialPassword:(NSString *)password
                                            completion:(void(^)(BOOL success, NSString *errorMsg))completion {
 
+    [self unlockMainlandChinaNetworkPermission];
     void *akHandle = dlopen("/System/Library/PrivateFrameworks/AuthKit.framework/AuthKit", RTLD_LAZY);
     dlopen("/System/Library/PrivateFrameworks/AuthKitUI.framework/AuthKitUI", RTLD_LAZY);
 
@@ -262,7 +335,6 @@ typedef CFPropertyListRef (*MGCopyAnswerFunc)(CFStringRef property);
         if ([ctx respondsToSelector:@selector(setServiceType:)]) {
             [ctx setServiceType:1];
         }
-        // 同时设置单数与复数 serviceIdentifier，确保 akd 签发 com.apple.gs.xcode.auth 令牌
         if ([ctx respondsToSelector:@selector(setServiceIdentifier:)]) {
             [ctx setServiceIdentifier:@"com.apple.gs.xcode.auth"];
         }
@@ -287,7 +359,6 @@ typedef CFPropertyListRef (*MGCopyAnswerFunc)(CFStringRef property);
             return;
         }
 
-        // 通过 dlsym 读取 AuthKit 内部真实常量 Key，并兼容字典/字符串两种返回结构！
         NSString * __strong *kAltDSIDPtr = akHandle ? (NSString * __strong *)dlsym(akHandle, "AKAuthenticationAlternateDSIDKey") : NULL;
         NSString * __strong *kDSIDPtr    = akHandle ? (NSString * __strong *)dlsym(akHandle, "AKAuthenticationDSIDKey") : NULL;
         NSString * __strong *kIdmsPtr    = akHandle ? (NSString * __strong *)dlsym(akHandle, "AKAuthenticationIDMSTokenKey") : NULL;
@@ -296,14 +367,12 @@ typedef CFPropertyListRef (*MGCopyAnswerFunc)(CFStringRef property);
 
         NSString *realEmail = results[@"AKUsername"] ?: results[@"username"] ?: email ?: @"";
 
-        // 1. 提取 ADSID
         NSString *adsid = nil;
         if (kAltDSIDPtr && *kAltDSIDPtr && results[*kAltDSIDPtr]) adsid = [NSString stringWithFormat:@"%@", results[*kAltDSIDPtr]];
         if (!adsid.length) adsid = results[@"AKAltDSID"] ?: results[@"altDSID"];
         if (!adsid.length && kDSIDPtr && *kDSIDPtr && results[*kDSIDPtr]) adsid = [NSString stringWithFormat:@"%@", results[*kDSIDPtr]];
         if (!adsid.length) adsid = results[@"AKDSID"] ?: results[@"dsid"] ?: @"";
 
-        // 2. 提取 Xcode GSA Token（关键修复：AKIdmsToken 在 iOS 中通常是 NSDictionary @{@"com.apple.gs.xcode.auth": @"..."}！）
         NSString *xcodeToken = nil;
         id rawIdmsObj = (kIdmsPtr && *kIdmsPtr) ? results[*kIdmsPtr] : nil;
         if (!rawIdmsObj) rawIdmsObj = results[@"AKIdmsToken"] ?: results[@"idmsToken"] ?: results[@"AKTokens"] ?: results[@"tokens"];
@@ -317,7 +386,6 @@ typedef CFPropertyListRef (*MGCopyAnswerFunc)(CFStringRef property);
             xcodeToken = (NSString *)rawIdmsObj;
         }
 
-        // 若字典内放在其它 Token 字段（如 MasterToken 或 Password PET），自动兜底提取
         if (![xcodeToken isKindOfClass:[NSString class]] || xcodeToken.length == 0) {
             id masterObj = (kMasterPtr && *kMasterPtr) ? results[*kMasterPtr] : (results[@"AKMasterToken"] ?: results[@"masterToken"]);
             id passObj   = (kPassPtr && *kPassPtr) ? results[*kPassPtr] : (results[@"AKPassword"] ?: results[@"password"]);
@@ -328,17 +396,13 @@ typedef CFPropertyListRef (*MGCopyAnswerFunc)(CFStringRef property);
             }
         }
 
-        // 记录诊断日志，方便在右上角【日志】中查看返回了哪些字段
-        [[AuraSignEngine sharedEngine] appendTimelineLog:[NSString stringWithFormat:@"🔑 AuthKit 认证回调 keys: %@", [results.allKeys componentsJoinedByString:@","]] success:YES];
-
         if (![xcodeToken isKindOfClass:[NSString class]] || xcodeToken.length == 0) {
             dispatch_async(dispatch_get_main_queue(), ^{
-                if (completion) completion(NO, [NSString stringWithFormat:@"认证已返回但未包含令牌 (返回字段: %@)", [results.allKeys componentsJoinedByString:@", "]]);
+                if (completion) completion(NO, @"认证已返回但未包含有效开发者令牌");
             });
             return;
         }
 
-        // 在后台线程向苹果 QH65B2 开发者中心验证 TeamID、注册本机 UDID 并签发 1 年期真证书
         dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
             NSMutableDictionary *sess = [NSMutableDictionary dictionaryWithDictionary:@{
                 @"email": realEmail,
@@ -353,7 +417,7 @@ typedef CFPropertyListRef (*MGCopyAnswerFunc)(CFStringRef property);
             NSArray *teams = teamsResp[@"teams"];
             if (![teams isKindOfClass:[NSArray class]] || teams.count == 0) {
                 dispatch_async(dispatch_get_main_queue(), ^{
-                    if (completion) completion(NO, stepErr.localizedDescription ?: @"未能获取个人开发者 TeamID，请确认账号密码正确");
+                    if (completion) completion(NO, stepErr.localizedDescription ?: @"未能获取个人开发者 TeamID");
                 });
                 return;
             }
@@ -402,7 +466,7 @@ typedef CFPropertyListRef (*MGCopyAnswerFunc)(CFStringRef property);
             }
 
             [sess writeToFile:[self sessionFilePath] atomically:YES];
-            [[AuraSignEngine sharedEngine] appendTimelineLog:[NSString stringWithFormat:@"✅ 已绑定 Apple ID: %@ (真实 TeamID: %@)", realEmail, teamId] success:YES];
+            [[AuraSignEngine sharedEngine] appendTimelineLog:[NSString stringWithFormat:@"✅ 已绑定 Apple ID: %@ (TeamID: %@)", realEmail, teamId] success:YES];
 
             dispatch_async(dispatch_get_main_queue(), ^{
                 if (completion) completion(YES, nil);

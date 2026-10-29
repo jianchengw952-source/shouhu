@@ -1,9 +1,9 @@
 Package: com.aurasign.pro
 Name: AuraSign Pro (灵签 Pro)
-Version: 1.0.0
+Version: 1.0.2
 Architecture: iphoneos-arm64
-Description: 专为 Dopamine (v3.0.12) 与 Relaxin (v0.5.6) 打造的 iOS 27 液态玻璃全自动 7 天真证书续签、防掉签关机拦截与免 VPN 直连软件源工坊。
+Description: 专为 Dopamine (v3.0.12) 与 Relaxin (v0.5.6) 打造的 iOS 27 液态玻璃全自动 7 天真证书续签与防掉签关机拦截工坊。
 Maintainer: AuraSign Team
 Author: AuraSign Team
 Section: System
-Depends: firmware (>= 15.0), mobilesubstrate | ellekit, openssl, zsign, dpkg, unzip
+Depends: firmware (>= 15.0), mobilesubstrate | ellekit, openssl, zsign, dpkg, unzip, curl

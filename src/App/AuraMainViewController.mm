@@ -1,4 +1,4 @@
-// src/App/AuraMainViewController.mm (修复过期负数天数显示与文字排版遮挡完整版)
+// src/App/AuraMainViewController.mm (双栏极速版：移除精选商店 + 全异步缓存彻底消除卡顿)
 #import <UIKit/UIKit.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <math.h>
@@ -14,15 +14,20 @@
 @end
 
 @implementation AuraMainViewController {
-    NSInteger _currentTab;
+    NSInteger _currentTab; // 仅保留 2 个纯净页面 -> 0: 🛡️守护中心 | 1: 🛠️签名工坊
     CAGradientLayer *_meshLayer;
     UIView *_topHeaderBar;
     UILabel *_headerTitleLabel;
     UILabel *_headerSubLabel;
     UIButton *_topRightActionButton;
     UITableView *_tableView;
+
+    // 内存缓存：彻底解决滑动列表时重复扫描磁盘与调用 libmis 造成的卡顿！
     NSArray<AuraAppInfo *> *_installedApps;
-    NSArray<AuraRepoAppItem *> *_storeCatalog;
+    AuraShieldStatus _cachedShieldStatus;
+    NSString *_cachedShieldSummary;
+    NSMutableDictionary<NSString *, UIImage *> *_iconCache;
+
     AuraLiquidGlassView *_bottomLiquidPillBar;
     UIView *_tabActiveIndicator;
     NSMutableArray<NSString *> *_pendingInjectedDebPaths;
@@ -33,6 +38,10 @@
 - (void)viewDidLoad {
     [super viewDidLoad];
     _pendingInjectedDebPaths = [NSMutableArray array];
+    _iconCache = [NSMutableDictionary dictionary];
+    _cachedShieldStatus = AuraShieldStatusSafe;
+    _cachedShieldSummary = @"正在后台检测越狱工具证书状态...";
+
     self.view.backgroundColor = [UIColor colorWithRed:0.04 green:0.06 blue:0.11 alpha:1.0];
 
     [self setupDynamicMeshBackground];
@@ -46,7 +55,7 @@
     [self.view addSubview:_tableView];
 
     [self setupFloatingLiquidPillTabBar];
-    [self reloadAllData];
+    [self reloadAllDataAsync];
 }
 
 - (void)viewDidLayoutSubviews {
@@ -65,13 +74,14 @@
     _tableView.frame = CGRectMake(0, tableTop, width, height - tableTop);
     _tableView.contentInset = UIEdgeInsetsMake(4, 0, safeBottom + 105.0, 0);
 
-    CGFloat pillW = width - 36.0;
-    _bottomLiquidPillBar.frame = CGRectMake(18.0, height - safeBottom - 64.0, pillW, 60.0);
-    CGFloat btnW = pillW / 3.0;
-    _tabActiveIndicator.frame = CGRectMake(_currentTab * btnW + 6.0, 6.0, btnW - 12.0, 48.0);
-    for (int i = 0; i < 3; i++) {
+    // 底部悬浮胶囊导航栏（2 栏对分，干净利落）
+    CGFloat pillW = width - 48.0;
+    _bottomLiquidPillBar.frame = CGRectMake(24.0, height - safeBottom - 64.0, pillW, 58.0);
+    CGFloat btnW = pillW / 2.0;
+    _tabActiveIndicator.frame = CGRectMake(_currentTab * btnW + 6.0, 6.0, btnW - 12.0, 46.0);
+    for (int i = 0; i < 2; i++) {
         UIButton *b = [_bottomLiquidPillBar viewWithTag:100 + i];
-        b.frame = CGRectMake(i * btnW, 0, btnW, 60.0);
+        b.frame = CGRectMake(i * btnW, 0, btnW, 58.0);
     }
 }
 
@@ -108,36 +118,28 @@
     [_topRightActionButton setTitle:@"📜 日志" forState:UIControlStateNormal];
     [_topRightActionButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
     _topRightActionButton.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightBold];
-    [_topRightActionButton addTarget:self action:@selector(onTopRightButtonTapped) forControlEvents:UIControlEventTouchUpInside];
+    [_topRightActionButton addTarget:self action:@selector(showTimelineLogsAlert) forControlEvents:UIControlEventTouchUpInside];
     [_topHeaderBar addSubview:_topRightActionButton];
 
     [self.view addSubview:_topHeaderBar];
 }
 
-- (void)onTopRightButtonTapped {
-    if (_currentTab == 2) {
-        [self showAddCustomRepoAlert];
-    } else {
-        [self showTimelineLogsAlert];
-    }
-}
-
 - (void)setupFloatingLiquidPillTabBar {
-    _bottomLiquidPillBar = [[AuraLiquidGlassView alloc] initWithFrame:CGRectZero cornerRadius:30];
+    _bottomLiquidPillBar = [[AuraLiquidGlassView alloc] initWithFrame:CGRectZero cornerRadius:29];
     _bottomLiquidPillBar.tintLevel = [AuraSignEngine sharedEngine].liquidGlassTintLevel;
 
     _tabActiveIndicator = [[UIView alloc] initWithFrame:CGRectZero];
-    _tabActiveIndicator.backgroundColor = [UIColor colorWithRed:0.12 green:0.68 blue:0.48 alpha:0.45];
-    _tabActiveIndicator.layer.cornerRadius = 24;
+    _tabActiveIndicator.backgroundColor = [UIColor colorWithRed:0.12 green:0.68 blue:0.48 alpha:0.48];
+    _tabActiveIndicator.layer.cornerRadius = 23;
     [_bottomLiquidPillBar addSubview:_tabActiveIndicator];
 
-    NSArray *titles = @[@"🛡️ 守护中心", @"🛠️ 签名工坊", @"🛍️ 精选商店"];
-    for (int i = 0; i < 3; i++) {
+    NSArray *titles = @[@"🛡️ 守护中心", @"🛠️ 签名工坊"];
+    for (int i = 0; i < 2; i++) {
         UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
         btn.tag = 100 + i;
         [btn setTitle:titles[i] forState:UIControlStateNormal];
         [btn setTitleColor:(i == 0 ? [UIColor whiteColor] : [UIColor colorWithWhite:1.0 alpha:0.55]) forState:UIControlStateNormal];
-        btn.titleLabel.font = [UIFont systemFontOfSize:14.5 weight:UIFontWeightBold];
+        btn.titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightBold];
         [btn addTarget:self action:@selector(onTabButtonTapped:) forControlEvents:UIControlEventTouchUpInside];
         [_bottomLiquidPillBar addSubview:btn];
     }
@@ -146,16 +148,14 @@
 
 - (void)onTabButtonTapped:(UIButton *)sender {
     _currentTab = sender.tag - 100;
-    NSArray *headerTitles = @[@"灵签 Pro · 守护中心", @"灵签 Pro · 签名工坊", @"灵签 Pro · 精选商店"];
-    _headerTitleLabel.text = headerTitles[_currentTab];
-    [_topRightActionButton setTitle:(_currentTab == 2 ? @"➕ 添加源" : @"📜 日志") forState:UIControlStateNormal];
+    _headerTitleLabel.text = (_currentTab == 0) ? @"灵签 Pro · 守护中心" : @"灵签 Pro · 签名工坊";
 
-    CGFloat btnW = _bottomLiquidPillBar.bounds.size.width / 3.0;
-    [UIView animateWithDuration:0.25 delay:0 usingSpringWithDamping:0.8 initialSpringVelocity:0.5 options:0 animations:^{
-        _tabActiveIndicator.frame = CGRectMake(_currentTab * btnW + 6.0, 6.0, btnW - 12.0, 48.0);
+    CGFloat btnW = _bottomLiquidPillBar.bounds.size.width / 2.0;
+    [UIView animateWithDuration:0.22 delay:0 usingSpringWithDamping:0.82 initialSpringVelocity:0.5 options:0 animations:^{
+        _tabActiveIndicator.frame = CGRectMake(_currentTab * btnW + 6.0, 6.0, btnW - 12.0, 46.0);
     } completion:nil];
 
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < 2; i++) {
         UIButton *b = [_bottomLiquidPillBar viewWithTag:100 + i];
         [b setTitleColor:(i == _currentTab ? [UIColor whiteColor] : [UIColor colorWithWhite:1.0 alpha:0.55]) forState:UIControlStateNormal];
     }
@@ -164,10 +164,35 @@
     [_tableView reloadData];
 }
 
-- (void)reloadAllData {
-    _installedApps = [[AuraSignEngine sharedEngine] scanTargetApps];
-    _storeCatalog = [[AuraSignEngine sharedEngine] loadBuiltInStoreCatalog];
-    [_tableView reloadData];
+// 【关键性能优化】：在后台线程执行扫描与 libmis 校验，并预先缓存所有应用图标，主线程滑动 0 卡顿！
+- (void)reloadAllDataAsync {
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        AuraSignEngine *engine = [AuraSignEngine sharedEngine];
+        NSArray<AuraAppInfo *> *apps = [engine scanTargetApps];
+        NSString *summary = nil;
+        AuraShieldStatus st = [engine evaluateGlobalShieldStatus:&summary];
+
+        CGFloat screenScale = [UIScreen mainScreen].scale;
+        for (AuraAppInfo *app in apps) {
+            if (app.bundleID.length && !_iconCache[app.bundleID]) {
+                if ([UIImage respondsToSelector:@selector(_applicationIconImageForBundleIdentifier:format:scale:)]) {
+                    UIImage *img = [UIImage _applicationIconImageForBundleIdentifier:app.bundleID format:2 scale:screenScale];
+                    if (img) {
+                        @synchronized (_iconCache) {
+                            _iconCache[app.bundleID] = img;
+                        }
+                    }
+                }
+            }
+        }
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            _installedApps = apps;
+            _cachedShieldStatus = st;
+            _cachedShieldSummary = summary ?: @"";
+            [_tableView reloadData];
+        });
+    });
 }
 
 - (void)showLoadingHUD:(NSString *)text {
@@ -202,12 +227,10 @@
     [_loadingOverlay removeFromSuperview];
 }
 
-#pragma mark - UITableView 数据源与高度优化
+#pragma mark - UITableView 数据源
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
-    if (_currentTab == 0) return 4;
-    if (_currentTab == 1) return 2;
-    return 2;
+    return (_currentTab == 0) ? 4 : 2;
 }
 
 - (CGFloat)tableView:(UITableView *)tableView heightForHeaderInSection:(NSInteger)section {
@@ -226,10 +249,8 @@
         if (section == 1) lbl.text = @"👤 APPLE ID 免费签名凭证";
         else if (section == 2) lbl.text = @"👑 越狱工具与已守护应用 (最多 3 个真证书槽位)";
         else if (section == 3) lbl.text = @"⚙️ 自动化续签与防失联安全防线";
-    } else if (_currentTab == 1) {
-        lbl.text = (section == 0) ? @"📦 IPA 导入与克隆多开" : @"💉 插件注入与智能省额度设置";
     } else {
-        lbl.text = (section == 0) ? @"👑 越狱官方最新版免 VPN 急救舱" : @"🔥 开源精选与自定义软件源 (点右上角可添加源)";
+        lbl.text = (section == 0) ? @"📦 IPA 导入与克隆多开" : @"💉 插件注入与智能省额度设置";
     }
     [header addSubview:lbl];
     return header;
@@ -242,9 +263,7 @@
         if (section == 2) return MAX(1, _installedApps.count);
         return 5;
     }
-    if (_currentTab == 1) return 3;
-    if (section == 0) return 3;
-    return MAX(0, (NSInteger)_storeCatalog.count - 3);
+    return 3;
 }
 
 - (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
@@ -252,9 +271,8 @@
         if (indexPath.section == 0) return 120;
         if (indexPath.section == 1) return 90;
         if (indexPath.section == 2) return 114;
-        return 80; // 加高设置行卡片，防止第二行小字贴底被切
+        return 80;
     }
-    if (_currentTab == 2) return 104;
     return 80;
 }
 
@@ -273,23 +291,22 @@
 
     if (_currentTab == 0) {
         if (indexPath.section == 0) {
-            NSString *summary = nil;
-            AuraShieldStatus st = [engine evaluateGlobalShieldStatus:&summary];
-            card.accentGlowColor = (st == AuraShieldStatusDanger)
+            // 直接读取内存缓存状态，绝不在滑动时阻塞主线程！
+            card.accentGlowColor = (_cachedShieldStatus == AuraShieldStatusDanger)
                 ? [UIColor colorWithRed:0.75 green:0.12 blue:0.18 alpha:1.0]
                 : [UIColor colorWithRed:0.06 green:0.52 blue:0.38 alpha:1.0];
 
             UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(18, 14, cardW - 36, 24)];
             title.font = [UIFont systemFontOfSize:17.5 weight:UIFontWeightHeavy];
             title.textColor = [UIColor whiteColor];
-            title.text = (st == AuraShieldStatusDanger) ? @"🔴 警告：切勿此时关机重启！" : @"🟢 重启安全护盾 · 已受保护";
+            title.text = (_cachedShieldStatus == AuraShieldStatusDanger) ? @"🔴 警告：切勿此时关机重启！" : @"🟢 重启安全护盾 · 已受保护";
             [card addSubview:title];
 
             UILabel *sub = [[UILabel alloc] initWithFrame:CGRectMake(18, 40, cardW - 36, 58)];
             sub.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
             sub.textColor = [UIColor colorWithWhite:1.0 alpha:0.92];
             sub.numberOfLines = 3;
-            sub.text = summary;
+            sub.text = _cachedShieldSummary;
             [card addSubview:sub];
         }
         else if (indexPath.section == 1) {
@@ -302,7 +319,6 @@
             t.text = loggedIn ? [api currentAppleIDEmail] : @"尚未绑定 Apple ID";
             [card addSubview:t];
 
-            // 开启 2 行完整显示，不再出现 ... 截断
             UILabel *s = [[UILabel alloc] initWithFrame:CGRectMake(18, 36, cardW - 122, 34)];
             s.font = [UIFont systemFontOfSize:11.5];
             s.numberOfLines = 2;
@@ -327,20 +343,20 @@
                 UILabel *empty = [[UILabel alloc] initWithFrame:card.bounds];
                 empty.textAlignment = NSTextAlignmentCenter;
                 empty.textColor = [UIColor whiteColor];
-                empty.text = @"未检测到个人证书应用 · 可在【精选商店】一键安装";
+                empty.text = @"正在扫描本机越狱工具与个人证书应用...";
                 [card addSubview:empty];
             } else {
                 AuraAppInfo *app = _installedApps[indexPath.row];
-                // 【关键修复】：判断证书是否已过期 (remainingDays <= 0) 或为假签名！
                 BOOL isExpiredOrInvalid = (app.isFakeSigned || app.remainingDays <= 0.0 || !app.isLibmisVerified);
 
                 UIImageView *iconView = [[UIImageView alloc] initWithFrame:CGRectMake(14, 16, 52, 52)];
                 iconView.layer.cornerRadius = 12;
                 iconView.clipsToBounds = YES;
                 iconView.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.15];
-                if ([UIImage respondsToSelector:@selector(_applicationIconImageForBundleIdentifier:format:scale:)]) {
-                    UIImage *appIcon = [UIImage _applicationIconImageForBundleIdentifier:app.bundleID format:2 scale:[UIScreen mainScreen].scale];
-                    if (appIcon) iconView.image = appIcon;
+                @synchronized (_iconCache) {
+                    if (app.bundleID.length && _iconCache[app.bundleID]) {
+                        iconView.image = _iconCache[app.bundleID];
+                    }
                 }
                 [card addSubview:iconView];
 
@@ -439,12 +455,13 @@
                 slider.minimumValue = 0.0f;
                 slider.maximumValue = 1.0f;
                 slider.value = engine.liquidGlassTintLevel;
+                slider.continuous = NO; // 松手时更新一次，彻底消除拖动滑块时的重绘卡顿！
                 [slider addTarget:self action:@selector(onLiquidGlassSliderChanged:) forControlEvents:UIControlEventValueChanged];
                 [card addSubview:slider];
             }
         }
     }
-    else if (_currentTab == 1) {
+    else {
         UILabel *lbl = [[UILabel alloc] initWithFrame:CGRectMake(18, 12, cardW - 96, 46)];
         lbl.font = [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold];
         lbl.textColor = [UIColor whiteColor];
@@ -484,34 +501,6 @@
             }
         }
     }
-    else {
-        NSInteger idx = (indexPath.section == 0) ? indexPath.row : (indexPath.row + 3);
-        AuraRepoAppItem *item = _storeCatalog[idx];
-
-        UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(18, 12, cardW - 120, 22)];
-        title.font = [UIFont systemFontOfSize:15.5 weight:UIFontWeightBold];
-        title.textColor = [UIColor whiteColor];
-        title.text = [NSString stringWithFormat:@"%@ · %@", item.name, item.version];
-        [card addSubview:title];
-
-        UILabel *desc = [[UILabel alloc] initWithFrame:CGRectMake(18, 36, cardW - 120, 44)];
-        desc.font = [UIFont systemFontOfSize:12];
-        desc.textColor = [UIColor colorWithWhite:1.0 alpha:0.82];
-        desc.numberOfLines = 2;
-        desc.text = item.summary;
-        [card addSubview:desc];
-
-        UIButton *getBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-        getBtn.frame = CGRectMake(cardW - 96, 26, 80, 36);
-        getBtn.backgroundColor = [UIColor colorWithRed:0.15 green:0.55 blue:0.96 alpha:0.95];
-        getBtn.layer.cornerRadius = 18;
-        [getBtn setTitle:@"获取签装" forState:UIControlStateNormal];
-        [getBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-        getBtn.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightBold];
-        getBtn.tag = idx;
-        [getBtn addTarget:self action:@selector(onStoreGetButtonTapped:) forControlEvents:UIControlEventTouchUpInside];
-        [card addSubview:getBtn];
-    }
 
     return cell;
 }
@@ -542,7 +531,7 @@
             [self showLoadingHUD:@"正在连接苹果服务器刷新 7 天证书..."];
             [[AuraSignEngine sharedEngine] performEmergencyResignAllWithCompletion:^(BOOL success, NSString *message) {
                 [self hideLoadingHUD];
-                [self reloadAllData];
+                [self reloadAllDataAsync];
                 [self showResultAlertWithTitle:(success ? @"✅ 刷新完成" : @"⚠️ 操作提示") message:message];
             }];
         } else if (indexPath.section == 0 && indexPath.row == 2) {
@@ -582,7 +571,7 @@
                                                                          initialPassword:pass
                                                                               completion:^(BOOL success, NSString *errorMsg) {
             [self hideLoadingHUD];
-            [self reloadAllData];
+            [self reloadAllDataAsync];
             if (success) {
                 [self showResultAlertWithTitle:@"✅ 绑定成功"
                                        message:[NSString stringWithFormat:@"已成功获取苹果 TeamID (%@) 并生成 1 年期开发证书！现在您可以直接点击应用右侧的【立即修复/续签】。", [[AuraAppleDeveloperAPI sharedAPI] currentTeamID]]];
@@ -595,36 +584,10 @@
     if ([[AuraAppleDeveloperAPI sharedAPI] hasValidAccountInKeychain]) {
         [alert addAction:[UIAlertAction actionWithTitle:@"退出当前账号" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
             [[AuraAppleDeveloperAPI sharedAPI] logoutCurrentAccount];
-            [self reloadAllData];
+            [self reloadAllDataAsync];
         }]];
     }
 
-    [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-    [self presentViewController:alert animated:YES completion:nil];
-}
-
-- (void)showAddCustomRepoAlert {
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"➕ 添加第三方软件源"
-                                                                   message:@"支持粘贴任何标准 JSON 软件源地址（兼容轻松签、Feather、AltStore 源格式）："
-                                                            preferredStyle:UIAlertControllerStyleAlert];
-    [alert addTextFieldWithConfigurationHandler:^(UITextField *tf) {
-        tf.placeholder = @"https://.../repo.json";
-        tf.keyboardType = UIKeyboardTypeURL;
-    }];
-    [alert addAction:[UIAlertAction actionWithTitle:@"解析并添加" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        NSString *url = alert.textFields[0].text ?: @"";
-        if (!url.length) return;
-        [self showLoadingHUD:@"正在解析软件源..."];
-        [[AuraSignEngine sharedEngine] addCustomRepoFromURL:url completion:^(BOOL success, NSInteger addedCount, NSString *errorMsg) {
-            [self hideLoadingHUD];
-            [self reloadAllData];
-            if (success) {
-                [self showResultAlertWithTitle:@"✅ 添加成功" message:[NSString stringWithFormat:@"已从该软件源成功导入 %ld 款应用！", (long)addedCount]];
-            } else {
-                [self showResultAlertWithTitle:@"❌ 添加失败" message:errorMsg];
-            }
-        }];
-    }]];
     [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
     [self presentViewController:alert animated:YES completion:nil];
 }
@@ -644,7 +607,7 @@
         dispatch_async(dispatch_get_main_queue(), ^{
             [self hideLoadingHUD];
             [_pendingInjectedDebPaths removeAllObjects];
-            [self reloadAllData];
+            [self reloadAllDataAsync];
             if (ok) {
                 UINotificationFeedbackGenerator *gen = [[UINotificationFeedbackGenerator alloc] init];
                 [gen notificationOccurred:UINotificationFeedbackTypeSuccess];
@@ -703,7 +666,7 @@
             dispatch_async(dispatch_get_main_queue(), ^{
                 [self hideLoadingHUD];
                 [_pendingInjectedDebPaths removeAllObjects];
-                [self reloadAllData];
+                [self reloadAllDataAsync];
                 if (ok) {
                     [self showResultAlertWithTitle:@"✅ 安装完成" message:@"IPA 已成功签入 7 天苹果真证书并安装至桌面！"];
                 } else {
@@ -759,7 +722,7 @@
             dispatch_async(dispatch_get_main_queue(), ^{
                 [self hideLoadingHUD];
                 [_pendingInjectedDebPaths removeAllObjects];
-                [self reloadAllData];
+                [self reloadAllDataAsync];
                 if (ok) {
                     [self showResultAlertWithTitle:@"✅ 多开完成" message:@"分身应用已签入 7 天真证书并安装至桌面！"];
                 } else {
@@ -770,18 +733,6 @@
     }]];
     [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
     [self presentViewController:alert animated:YES completion:nil];
-}
-
-- (void)onStoreGetButtonTapped:(UIButton *)sender {
-    AuraRepoAppItem *item = _storeCatalog[sender.tag];
-    [self showLoadingHUD:[NSString stringWithFormat:@"准备下载【%@】...", item.name]];
-    [[AuraSignEngine sharedEngine] downloadAndSignRepoItem:item progress:^(NSString *stageText) {
-        _loadingTextLabel.text = stageText;
-    } completion:^(BOOL success, NSString *message) {
-        [self hideLoadingHUD];
-        [self reloadAllData];
-        [self showResultAlertWithTitle:(success ? @"✅ 签装完成" : @"❌ 签装提示") message:message];
-    }];
 }
 
 - (void)onLiquidGlassSliderChanged:(UISlider *)slider {
