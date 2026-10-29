@@ -1,0 +1,7 @@
+# Ensure shell scripts have LF endings
+* text=auto
+layout/DEBIAN/postinst text eol=lf
+Makefile text eol=lf
+src/App/Makefile text eol=lf
+src/Daemon/Makefile text eol=lf
+src/Tweak/Makefile text eol=lf
