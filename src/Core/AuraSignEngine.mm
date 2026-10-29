@@ -476,29 +476,59 @@ typedef int (*MobileInstallationInstallFunc)(CFStringRef path, CFDictionaryRef o
     if (completion) completion(NO, 0, nil);
 }
 
-#pragma mark - 深度诊断日志系统 (记录最多 100 条完整上下文日志)
+#pragma mark - 深度诊断日志系统 (内存实时缓存 + 0666 跨进程文件共享，确保 100% 记录前端 App 日志!)
+
+static NSMutableArray<NSDictionary *> *gRuntimeMemoryLogs = nil;
 
 - (NSString *)logFilePath {
-    return AURA_NS_JBROOT(@"/var/mobile/Library/AuraSignPro/timeline.plist");
+    NSString *dir = AURA_NS_JBROOT(@"/var/mobile/Library/AuraSignPro");
+    [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions: @(0777)} error:nil];
+    chmod(dir.UTF8String, 0777);
+    return [dir stringByAppendingPathComponent:@"timeline.plist"];
 }
 
 - (NSArray<NSDictionary *> *)readAuditTimelineLogs {
-    return [NSArray arrayWithContentsOfFile:[self logFilePath]] ?: @[];
+    @synchronized (self) {
+        if (!gRuntimeMemoryLogs) {
+            gRuntimeMemoryLogs = [NSMutableArray array];
+        }
+        NSArray *diskLogs = [NSArray arrayWithContentsOfFile:[self logFilePath]] ?: @[];
+        if (gRuntimeMemoryLogs.count == 0) {
+            return diskLogs;
+        }
+        // 将当前进程内存中的实时日志置于最顶部，确保哪怕文件权限受限也 100% 能复制出刚发生的登录诊断日志！
+        NSMutableArray *merged = [NSMutableArray arrayWithArray:gRuntimeMemoryLogs];
+        for (NSDictionary *d in diskLogs) {
+            if (![merged containsObject:d] && merged.count < 80) {
+                [merged addObject:d];
+            }
+        }
+        return merged;
+    }
 }
 
 - (void)appendTimelineLog:(NSString *)event success:(BOOL)success {
     @synchronized (self) {
-        NSMutableArray *logs = [[self readAuditTimelineLogs] mutableCopy];
+        if (!gRuntimeMemoryLogs) {
+            gRuntimeMemoryLogs = [NSMutableArray array];
+        }
         NSDateFormatter *df = [[NSDateFormatter alloc] init];
         df.dateFormat = @"MM-dd HH:mm:ss";
-        [logs insertObject:@{
+        NSDictionary *entry = @{
             @"time": [df stringFromDate:[NSDate date]],
             @"event": event ?: @"",
             @"success": @(success)
-        } atIndex:0];
-        if (logs.count > 100) [logs removeLastObject];
-        [[NSFileManager defaultManager] createDirectoryAtPath:[[self logFilePath] stringByDeletingLastPathComponent] withIntermediateDirectories:YES attributes:nil error:nil];
-        [logs writeToFile:[self logFilePath] atomically:YES];
+        };
+        [gRuntimeMemoryLogs insertObject:entry atIndex:0];
+        if (gRuntimeMemoryLogs.count > 60) [gRuntimeMemoryLogs removeLastObject];
+
+        NSString *path = [self logFilePath];
+        NSMutableArray *diskLogs = [[NSArray arrayWithContentsOfFile:path] mutableCopy] ?: [NSMutableArray array];
+        [diskLogs insertObject:entry atIndex:0];
+        if (diskLogs.count > 60) [diskLogs removeLastObject];
+        [diskLogs writeToFile:path atomically:YES];
+        chmod(path.UTF8String, 0666);
+        chown(path.UTF8String, 501, 501);
     }
 }
 

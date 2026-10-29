@@ -70,8 +70,13 @@ typedef int (*CTServerConnectionSetCellularUsagePolicyFunc)(CFTypeRef, CFStringR
 }
 
 - (NSString *)keychainDir {
-    NSString *dir = AURA_NS_JBROOT(@"/var/mobile/Library/AuraSignPro/KeychainCert");
-    [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+    NSString *base = AURA_NS_JBROOT(@"/var/mobile/Library/AuraSignPro");
+    NSString *dir = [base stringByAppendingPathComponent:@"KeychainCert"];
+    [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions: @(0777)} error:nil];
+    chmod(base.UTF8String, 0777);
+    chmod(dir.UTF8String, 0777);
+    chown(base.UTF8String, 501, 501);
+    chown(dir.UTF8String, 501, 501);
     return dir;
 }
 
@@ -518,6 +523,12 @@ typedef int (*CTServerConnectionSetCellularUsagePolicyFunc)(CFTypeRef, CFStringR
             }
 
             [sess writeToFile:[self sessionFilePath] atomically:YES];
+            chmod([self sessionFilePath].UTF8String, 0666);
+            chown([self sessionFilePath].UTF8String, 501, 501);
+            if ([[NSFileManager defaultManager] fileExistsAtPath:[self p12FilePath]]) {
+                chmod([self p12FilePath].UTF8String, 0666);
+                chown([self p12FilePath].UTF8String, 501, 501);
+            }
             [[AuraSignEngine sharedEngine] appendTimelineLog:[NSString stringWithFormat:@"[LOGIN-SUCCESS] 已绑定 Apple ID: %@ (TeamID: %@)", realEmail, teamId] success:YES];
 
             dispatch_async(dispatch_get_main_queue(), ^{

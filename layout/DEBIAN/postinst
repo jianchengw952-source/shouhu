@@ -1,7 +1,6 @@
 #!/bin/sh
 set -e
 
-# 1. 自动探测当前是 Dopamine (/var/jb) 还是 Relaxin (.jbroot-*)
 JBROOT=""
 if [ -d "/var/jb" ]; then
     JBROOT="/var/jb"
@@ -10,10 +9,16 @@ else
 fi
 
 if [ -n "$JBROOT" ]; then
+    # 【关键修复】：预先创建数据与证书目录并赋予 0777 与 mobile:mobile 权限，确保桌面 App 100% 可读写！
+    DATA_DIR="$JBROOT/var/mobile/Library/AuraSignPro"
+    PREF_DIR="$JBROOT/var/mobile/Library/Preferences"
+    mkdir -p "$DATA_DIR/KeychainCert" "$DATA_DIR/Vault" "$PREF_DIR"
+    chown -R 501:501 "$DATA_DIR" "$PREF_DIR" 2>/dev/null || true
+    chmod -R 0777 "$DATA_DIR" 2>/dev/null || true
+
     APP_DIR="$JBROOT/Applications/AuraSignPro.app"
     mkdir -p "$APP_DIR"
 
-    # 2. 双重保险：确保 AuraSignPro.app/Info.plist 100% 存在且格式正确
     cat <<EOF > "$APP_DIR/Info.plist"
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -32,7 +37,7 @@ if [ -n "$JBROOT" ]; then
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0.0</string>
+    <string>1.0.3</string>
     <key>CFBundleSignature</key>
     <string>????</string>
     <key>CFBundleVersion</key>
@@ -54,12 +59,10 @@ EOF
     chmod 755 "$APP_DIR/AuraSignPro" 2>/dev/null || true
     chmod 644 "$APP_DIR/Info.plist" 2>/dev/null || true
 
-    # 3. 【关键修复】：使用越狱根目录下的绝对路径 uicache -p 强制注册桌面图标！
     if [ -x "$JBROOT/usr/bin/uicache" ]; then
         "$JBROOT/usr/bin/uicache" -p "$APP_DIR" || "$JBROOT/usr/bin/uicache" -a || true
     fi
 
-    # 4. 生成并启动后台守护进程
     mkdir -p "$JBROOT/Library/LaunchDaemons"
     PLIST="$JBROOT/Library/LaunchDaemons/com.aurasign.pro.daemon.plist"
     DAEMON_BIN="$JBROOT/usr/bin/aurasignd"
