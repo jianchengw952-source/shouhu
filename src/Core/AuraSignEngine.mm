@@ -1,4 +1,4 @@
-// src/Core/AuraSignEngine.mm (采用 iOS 17 原生 LSApplicationWorkspace installApplication:withOptions:error: + libmis 注册完整版)
+// src/Core/AuraSignEngine.mm (在 zsign 前预先修复只读权限 + 原生 LSApplicationWorkspace 双通道安装)
 #import <CoreFoundation/CoreFoundation.h>
 #import "AuraSignEngine.h"
 #import "AuraAppleDeveloperAPI.h"
@@ -7,6 +7,7 @@
 #import <sys/stat.h>
 #import <spawn.h>
 #import <sys/wait.h>
+#import <unistd.h>
 
 #if defined(__APPLE__)
 #include <crt_externs.h>
@@ -91,21 +92,17 @@ typedef int (*MISInstallProvisioningProfileFunc)(CFTypeRef profile);
 
 - (NSDictionary<NSString *, NSString *> *)fetchNativeAnisetteHeaders {
     __block id anisetteDataObj = nil;
-    __block NSError *aniErr = nil;
-
     Class ctrlClass = NSClassFromString(@"AKAnisetteProvisioningController");
     if (ctrlClass) {
         id ctrl = [[ctrlClass alloc] init];
         if ([ctrl respondsToSelector:@selector(anisetteDataWithError:)]) {
             NSError *syncErr = nil;
             anisetteDataObj = [ctrl anisetteDataWithError:&syncErr];
-            aniErr = syncErr;
         }
         if (!anisetteDataObj && [ctrl respondsToSelector:@selector(anisetteDataWithCompletion:)]) {
             dispatch_semaphore_t sem = dispatch_semaphore_create(0);
             [ctrl anisetteDataWithCompletion:^(id data, NSError *error) {
                 anisetteDataObj = data;
-                aniErr = error;
                 dispatch_semaphore_signal(sem);
             }];
             dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC));
@@ -117,13 +114,10 @@ typedef int (*MISInstallProvisioningProfileFunc)(CFTypeRef profile);
     NSString *tz = [[NSTimeZone localTimeZone] abbreviation] ?: @"CST";
 
     if (anisetteDataObj && [anisetteDataObj oneTimePassword] && [anisetteDataObj machineID]) {
-        NSString *otp = [anisetteDataObj oneTimePassword];
-        NSString *mid = [anisetteDataObj machineID];
-        NSString *rinfo = [NSString stringWithFormat:@"%llu", [anisetteDataObj routingInfo]];
         return @{
-            @"X-Apple-I-MD": otp,
-            @"X-Apple-I-MD-M": mid,
-            @"X-Apple-I-MD-RINFO": rinfo,
+            @"X-Apple-I-MD": [anisetteDataObj oneTimePassword],
+            @"X-Apple-I-MD-M": [anisetteDataObj machineID],
+            @"X-Apple-I-MD-RINFO": [NSString stringWithFormat:@"%llu", [anisetteDataObj routingInfo]],
             @"X-Apple-I-Client-Time": clientTime,
             @"X-Apple-I-TimeZone": tz,
             @"X-Apple-Locale": @"zh_CN"
@@ -136,7 +130,6 @@ typedef int (*MISInstallProvisioningProfileFunc)(CFTypeRef profile);
     };
 }
 
-// 将 7 天 .mobileprovision 直接注册进未越狱系统 misagent 信任库
 - (void)installProvisioningProfileIntoSystemMIS:(NSData *)profileData {
     if (!profileData.length) return;
     void *misHandle = dlopen("/usr/lib/libmis.dylib", RTLD_LAZY);
@@ -335,8 +328,6 @@ typedef int (*MISInstallProvisioningProfileFunc)(CFTypeRef profile);
     return ok;
 }
 
-#pragma mark - 【关键修复】：使用 iOS 17 原生 LSApplicationWorkspace installApplication:withOptions:error: 安装！
-
 - (BOOL)fastResignApp:(AuraAppInfo *)app
         stripPlugIns:(BOOL)strip
           customName:(NSString *)customName
@@ -365,10 +356,8 @@ typedef int (*MISInstallProvisioningProfileFunc)(CFTypeRef profile);
         return NO;
     }
 
-    // 1. 先将该 7 天描述文件注册进系统 misagent 信任库
     [self installProvisioningProfileIntoSystemMIS:realProfileData];
 
-    // 2. 准备暂存目录
     NSString *publicStaging = @"/var/mobile/Media/PublicStaging";
     [[NSFileManager defaultManager] createDirectoryAtPath:publicStaging withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions: @(0777)} error:nil];
     chown(publicStaging.UTF8String, 501, 501);
@@ -380,6 +369,9 @@ typedef int (*MISInstallProvisioningProfileFunc)(CFTypeRef profile);
     NSString *appFolderName = [app.bundlePath lastPathComponent];
     NSString *stagedAppPath = [payloadDir stringByAppendingPathComponent:appFolderName];
     [[NSFileManager defaultManager] copyItemAtPath:app.bundlePath toPath:stagedAppPath error:nil];
+
+    // 【关键修复】：在调用 zsign 之前，先把复制过来的只读二进制全部改为可读写 (0755)！
+    [self recursivelyFixInstalldPermissions:stageRoot];
 
     if (strip && !app.isJailbreakLoader) {
         [[NSFileManager defaultManager] removeItemAtPath:[stagedAppPath stringByAppendingPathComponent:@"PlugIns"] error:nil];
@@ -412,7 +404,6 @@ typedef int (*MISInstallProvisioningProfileFunc)(CFTypeRef profile);
         }
     }
 
-    // 3. 调用 zsign 对 stagedAppPath 进行真证书签名并输出 signed.ipa
     BOOL zsignOK = [api performRealZSignOnAppBundle:stagedAppPath profileData:realProfileData injectedDylibs:dylibRelPaths error:outError];
     if (!zsignOK) {
         [[NSFileManager defaultManager] removeItemAtPath:stageRoot error:nil];
@@ -424,13 +415,11 @@ typedef int (*MISInstallProvisioningProfileFunc)(CFTypeRef profile);
     [self recursivelyFixInstalldPermissions:stageRoot];
     NSString *signedIpaPath = [payloadDir stringByAppendingPathComponent:@"signed.ipa"];
 
-    // 4. 调用 iOS 17 原生 LSApplicationWorkspace installApplication:withOptions:error: 安装！
     Class wsClass = NSClassFromString(@"LSApplicationWorkspace");
     id workspace = [wsClass defaultWorkspace];
     BOOL installSuccess = NO;
     NSError *lsError = nil;
 
-    // 通道 A：通过 signed.ipa 标准 Customer 模式安装
     if ([[NSFileManager defaultManager] fileExistsAtPath:signedIpaPath] &&
         [workspace respondsToSelector:@selector(installApplication:withOptions:error:)]) {
         NSDictionary *ipaOpts = @{
@@ -442,7 +431,6 @@ typedef int (*MISInstallProvisioningProfileFunc)(CFTypeRef profile);
             app.appName, installSuccess, lsError.localizedDescription ?: @"nil"] success:installSuccess];
     }
 
-    // 通道 B：若通道 A 未成功，通过 stagedAppPath (.app 目录) Developer 模式安装
     if (!installSuccess && [[NSFileManager defaultManager] fileExistsAtPath:stagedAppPath] &&
         [workspace respondsToSelector:@selector(installApplication:withOptions:error:)]) {
         lsError = nil;
