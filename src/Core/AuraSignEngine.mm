@@ -1,4 +1,4 @@
-// src/Core/AuraSignEngine.mm (在 zsign 前预先修复只读权限 + 原生 LSApplicationWorkspace 双通道安装)
+// src/Core/AuraSignEngine.mm (内置纯 C 语言 IPA 打包器 + Developer/Customer/原位 uicache 三通道安装终极版)
 #import <CoreFoundation/CoreFoundation.h>
 #import "AuraSignEngine.h"
 #import "AuraAppleDeveloperAPI.h"
@@ -7,7 +7,6 @@
 #import <sys/stat.h>
 #import <spawn.h>
 #import <sys/wait.h>
-#import <unistd.h>
 
 #if defined(__APPLE__)
 #include <crt_externs.h>
@@ -35,6 +34,64 @@ extern char **environ;
 typedef int (*MISValidateSignatureFunc)(CFStringRef file, CFDictionaryRef options, CFDictionaryRef *info);
 typedef CFTypeRef (*MISProfileCreateWithDataFunc)(CFAllocatorRef alloc, CFDataRef data);
 typedef int (*MISInstallProvisioningProfileFunc)(CFTypeRef profile);
+
+static uint32_t aura_crc32_compute(const uint8_t *buf, size_t len) {
+    uint32_t crc = 0xFFFFFFFF;
+    for (size_t i = 0; i < len; i++) {
+        crc ^= buf[i];
+        for (int j = 0; j < 8; j++) {
+            crc = (crc >> 1) ^ (0xEDB88320 & (-(int32_t)(crc & 1)));
+        }
+    }
+    return ~crc;
+}
+
+#pragma pack(push, 1)
+typedef struct {
+    uint32_t signature;      // 0x04034b50
+    uint16_t versionNeeded;  // 20
+    uint16_t flags;          // 0
+    uint16_t compression;    // 0 (STORE)
+    uint16_t modTime;
+    uint16_t modDate;
+    uint32_t crc32;
+    uint32_t compressedSize;
+    uint32_t uncompressedSize;
+    uint16_t fileNameLen;
+    uint16_t extraFieldLen;
+} AuraZipLocalHeader;
+
+typedef struct {
+    uint32_t signature;      // 0x02014b50
+    uint16_t versionMadeBy;  // 0x0314 (Unix)
+    uint16_t versionNeeded;  // 20
+    uint16_t flags;          // 0
+    uint16_t compression;    // 0
+    uint16_t modTime;
+    uint16_t modDate;
+    uint32_t crc32;
+    uint32_t compressedSize;
+    uint32_t uncompressedSize;
+    uint16_t fileNameLen;
+    uint16_t extraFieldLen;
+    uint16_t fileCommentLen;
+    uint16_t diskNumberStart;
+    uint16_t internalAttrs;
+    uint32_t externalAttrs;
+    uint32_t localHeaderOffset;
+} AuraZipCentralHeader;
+
+typedef struct {
+    uint32_t signature;      // 0x06054b50
+    uint16_t diskNumber;
+    uint16_t centralDirDisk;
+    uint16_t numEntriesThisDisk;
+    uint16_t numEntriesTotal;
+    uint32_t centralDirSize;
+    uint32_t centralDirOffset;
+    uint16_t commentLen;
+} AuraZipEndRecord;
+#pragma pack(pop)
 
 @implementation AuraAppInfo
 @end
@@ -276,6 +333,107 @@ typedef int (*MISInstallProvisioningProfileFunc)(CFTypeRef profile);
     }
 }
 
+// 内置纯 C 语言 ZIP (.ipa) 打包器：无须外部 zip 命令
+- (BOOL)createNativeIPAFromStageRoot:(NSString *)stageRoot toIpaPath:(NSString *)ipaPath {
+    FILE *fp = fopen(ipaPath.UTF8String, "wb");
+    if (!fp) return NO;
+
+    NSMutableData *centralDirData = [NSMutableData data];
+    uint16_t entryCount = 0;
+
+    NSDirectoryEnumerator *enumerator = [[NSFileManager defaultManager] enumeratorAtPath:stageRoot];
+    for (NSString *relPath in enumerator) {
+        if (![relPath hasPrefix:@"Payload/"]) continue;
+        if ([relPath containsString:@".zsign_cache"]) continue;
+
+        NSString *fullPath = [stageRoot stringByAppendingPathComponent:relPath];
+        struct stat st;
+        if (lstat(fullPath.UTF8String, &st) != 0) continue;
+        if (S_ISDIR(st.st_mode)) continue;
+
+        NSData *fileData = nil;
+        uint32_t externalAttr = (0100755 << 16);
+        uint16_t versionNeeded = 20;
+
+        if (S_ISLNK(st.st_mode)) {
+            char linkTarget[1024] = {0};
+            ssize_t linkLen = readlink(fullPath.UTF8String, linkTarget, sizeof(linkTarget) - 1);
+            if (linkLen <= 0) continue;
+            fileData = [NSData dataWithBytes:linkTarget length:linkLen];
+            externalAttr = (0120755 << 16);
+        } else {
+            fileData = [NSData dataWithContentsOfFile:fullPath];
+            if (!fileData) continue;
+        }
+
+        const char *nameUTF8 = relPath.UTF8String;
+        uint16_t nameLen = (uint16_t)strlen(nameUTF8);
+        uint32_t fileLen = (uint32_t)fileData.length;
+        uint32_t crc = aura_crc32_compute((const uint8_t *)fileData.bytes, fileLen);
+        uint32_t localOffset = (uint32_t)ftell(fp);
+
+        AuraZipLocalHeader lh = {
+            .signature = 0x04034b50,
+            .versionNeeded = versionNeeded,
+            .flags = 0,
+            .compression = 0,
+            .modTime = 0,
+            .modDate = 0x5421,
+            .crc32 = crc,
+            .compressedSize = fileLen,
+            .uncompressedSize = fileLen,
+            .fileNameLen = nameLen,
+            .extraFieldLen = 0
+        };
+        fwrite(&lh, sizeof(lh), 1, fp);
+        fwrite(nameUTF8, 1, nameLen, fp);
+        if (fileLen > 0) fwrite(fileData.bytes, 1, fileLen, fp);
+
+        AuraZipCentralHeader ch = {
+            .signature = 0x02014b50,
+            .versionMadeBy = 0x0314,
+            .versionNeeded = versionNeeded,
+            .flags = 0,
+            .compression = 0,
+            .modTime = 0,
+            .modDate = 0x5421,
+            .crc32 = crc,
+            .compressedSize = fileLen,
+            .uncompressedSize = fileLen,
+            .fileNameLen = nameLen,
+            .extraFieldLen = 0,
+            .fileCommentLen = 0,
+            .diskNumberStart = 0,
+            .internalAttrs = 0,
+            .externalAttrs = externalAttr,
+            .localHeaderOffset = localOffset
+        };
+        [centralDirData appendBytes:&ch length:sizeof(ch)];
+        [centralDirData appendBytes:nameUTF8 length:nameLen];
+        entryCount++;
+    }
+
+    uint32_t cdOffset = (uint32_t)ftell(fp);
+    uint32_t cdSize = (uint32_t)centralDirData.length;
+    if (cdSize > 0) fwrite(centralDirData.bytes, 1, cdSize, fp);
+
+    AuraZipEndRecord eocd = {
+        .signature = 0x06054b50,
+        .diskNumber = 0,
+        .centralDirDisk = 0,
+        .numEntriesThisDisk = entryCount,
+        .numEntriesTotal = entryCount,
+        .centralDirSize = cdSize,
+        .centralDirOffset = cdOffset,
+        .commentLen = 0
+    };
+    fwrite(&eocd, sizeof(eocd), 1, fp);
+    fclose(fp);
+    chown(ipaPath.UTF8String, 501, 501);
+    chmod(ipaPath.UTF8String, 0666);
+    return (entryCount > 0);
+}
+
 - (BOOL)installAndSignIPAFileAtPath:(NSString *)ipaFilePath
                          customName:(NSString *)customName
                      customBundleID:(NSString *)customBundleID
@@ -340,7 +498,6 @@ typedef int (*MISInstallProvisioningProfileFunc)(CFTypeRef profile);
         if (outError) {
             *outError = [NSError errorWithDomain:@"AuraSign" code:401 userInfo:@{NSLocalizedDescriptionKey: @"您尚未绑定 Apple ID！请先在【守护中心】点击【立即登录】绑定您的免费 Apple ID"}];
         }
-        [self appendTimelineLog:[NSString stringWithFormat:@"[SIGN-ABORT] 【%@】签名中止：尚未登录绑定 Apple ID", app.appName] success:NO];
         return NO;
     }
 
@@ -351,8 +508,6 @@ typedef int (*MISInstallProvisioningProfileFunc)(CFTypeRef profile);
                                                                outResolvedBundle:&resolvedBundleID
                                                                            error:outError];
     if (!realProfileData || realProfileData.length == 0) {
-        NSString *errMsg = (outError && *outError) ? (*outError).localizedDescription : @"未能从苹果获取 7 天描述文件";
-        [self appendTimelineLog:[NSString stringWithFormat:@"[SIGN-ERR] 【%@】获取苹果描述文件失败：%@", app.appName, errMsg] success:NO];
         return NO;
     }
 
@@ -370,7 +525,6 @@ typedef int (*MISInstallProvisioningProfileFunc)(CFTypeRef profile);
     NSString *stagedAppPath = [payloadDir stringByAppendingPathComponent:appFolderName];
     [[NSFileManager defaultManager] copyItemAtPath:app.bundlePath toPath:stagedAppPath error:nil];
 
-    // 【关键修复】：在调用 zsign 之前，先把复制过来的只读二进制全部改为可读写 (0755)！
     [self recursivelyFixInstalldPermissions:stageRoot];
 
     if (strip && !app.isJailbreakLoader) {
@@ -413,27 +567,15 @@ typedef int (*MISInstallProvisioningProfileFunc)(CFTypeRef profile);
     }
 
     [self recursivelyFixInstalldPermissions:stageRoot];
-    NSString *signedIpaPath = [payloadDir stringByAppendingPathComponent:@"signed.ipa"];
 
     Class wsClass = NSClassFromString(@"LSApplicationWorkspace");
     id workspace = [wsClass defaultWorkspace];
     BOOL installSuccess = NO;
     NSError *lsError = nil;
 
-    if ([[NSFileManager defaultManager] fileExistsAtPath:signedIpaPath] &&
+    // 通道 1：直接通过 Developer 模式安装已原地签好名的 stagedAppPath (.app 目录)
+    if ([[NSFileManager defaultManager] fileExistsAtPath:stagedAppPath] &&
         [workspace respondsToSelector:@selector(installApplication:withOptions:error:)]) {
-        NSDictionary *ipaOpts = @{
-            @"CFBundleIdentifier": resolvedBundleID,
-            @"PackageType": @"Customer"
-        };
-        installSuccess = [workspace installApplication:[NSURL fileURLWithPath:signedIpaPath] withOptions:ipaOpts error:&lsError];
-        [self appendTimelineLog:[NSString stringWithFormat:@"[LS-INSTALL-IPA] 【%@】installed=%d, err=%@",
-            app.appName, installSuccess, lsError.localizedDescription ?: @"nil"] success:installSuccess];
-    }
-
-    if (!installSuccess && [[NSFileManager defaultManager] fileExistsAtPath:stagedAppPath] &&
-        [workspace respondsToSelector:@selector(installApplication:withOptions:error:)]) {
-        lsError = nil;
         NSDictionary *devOpts = @{
             @"CFBundleIdentifier": resolvedBundleID,
             @"PackageType": @"Developer"
@@ -443,16 +585,56 @@ typedef int (*MISInstallProvisioningProfileFunc)(CFTypeRef profile);
             app.appName, installSuccess, lsError.localizedDescription ?: @"nil"] success:installSuccess];
     }
 
+    // 通道 2：若通道 1 未通过，使用内置纯 C ZIP 打包器生成 signed.ipa 并通过 Customer 模式安装
+    if (!installSuccess && [workspace respondsToSelector:@selector(installApplication:withOptions:error:)]) {
+        NSString *signedIpaPath = [stageRoot stringByAppendingPathComponent:@"signed.ipa"];
+        if ([self createNativeIPAFromStageRoot:stageRoot toIpaPath:signedIpaPath]) {
+            lsError = nil;
+            NSDictionary *ipaOpts = @{
+                @"CFBundleIdentifier": resolvedBundleID,
+                @"PackageType": @"Customer"
+            };
+            installSuccess = [workspace installApplication:[NSURL fileURLWithPath:signedIpaPath] withOptions:ipaOpts error:&lsError];
+            [self appendTimelineLog:[NSString stringWithFormat:@"[LS-INSTALL-IPA] 【%@】installed=%d, err=%@",
+                app.appName, installSuccess, lsError.localizedDescription ?: @"nil"] success:installSuccess];
+        }
+    }
+
+    // 通道 3：针对本机已存在的假签名/越狱加载器 (因旧签名 TeamID 不一致被 installd 拦截时)，原位覆盖真签名并调用 uicache -p 刷新
+    if (!installSuccess && app.bundlePath.length > 0 && [[NSFileManager defaultManager] fileExistsAtPath:app.bundlePath] && !customBundleID.length) {
+        NSArray *subItems = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:stagedAppPath error:nil];
+        for (NSString *item in subItems) {
+            NSString *src = [stagedAppPath stringByAppendingPathComponent:item];
+            NSString *dst = [app.bundlePath stringByAppendingPathComponent:item];
+            [[NSFileManager defaultManager] removeItemAtPath:dst error:nil];
+            [[NSFileManager defaultManager] copyItemAtPath:src toPath:dst error:nil];
+        }
+        [self recursivelyFixInstalldPermissions:app.bundlePath];
+
+        NSString *uicacheBin = AURA_NS_JBROOT(@"/usr/bin/uicache");
+        if ([[NSFileManager defaultManager] fileExistsAtPath:uicacheBin]) {
+            const char *uArgs[] = {uicacheBin.UTF8String, "-p", app.bundlePath.UTF8String, NULL};
+            pid_t uPid = 0;
+            int uStatus = 0;
+            if (posix_spawn(&uPid, uicacheBin.UTF8String, NULL, NULL, (char *const *)uArgs, environ) == 0) {
+                waitpid(uPid, &uStatus, 0);
+            }
+        }
+        installSuccess = [self verifyUnjailbrokenBootability:app.bundlePath];
+        [self appendTimelineLog:[NSString stringWithFormat:@"[INPLACE-UICACHE] 【%@】原位替换真证书并校验 libmis=%d",
+            app.appName, installSuccess] success:installSuccess];
+    }
+
     [[NSFileManager defaultManager] removeItemAtPath:stageRoot error:nil];
 
     if (!installSuccess) {
         if (outError) {
-            *outError = lsError ?: [NSError errorWithDomain:@"AuraSign" code:-1 userInfo:@{NSLocalizedDescriptionKey: @"LSApplicationWorkspace 安装未通过，请复制诊断日志查看详情"}];
+            *outError = lsError ?: [NSError errorWithDomain:@"AuraSign" code:-1 userInfo:@{NSLocalizedDescriptionKey: @"安装未通过，请复制诊断日志查看详情"}];
         }
         return NO;
     }
 
-    [self appendTimelineLog:[NSString stringWithFormat:@"🎉 [RESIGN-SUCCESS] 【%@】已成功签入 7 天苹果真证书并完成覆盖安装！(BundleID:%@)", app.appName, resolvedBundleID] success:YES];
+    [self appendTimelineLog:[NSString stringWithFormat:@"🎉 [RESIGN-SUCCESS] 【%@】已成功签入 7 天苹果真证书并完成安装！(BundleID:%@)", app.appName, resolvedBundleID] success:YES];
     return YES;
 }
 

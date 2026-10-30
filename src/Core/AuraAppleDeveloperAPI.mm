@@ -1,4 +1,4 @@
-// src/Core/AuraAppleDeveloperAPI.mm (支持 OpenSSL 3 PKCS#1 转换 + 证书自动配对校验 + zsign 详细日志终极版)
+// src/Core/AuraAppleDeveloperAPI.mm (原地 zsign 签名 + PKCS#1 转换 + 尾部完整日志终极版)
 #import <CoreFoundation/CoreFoundation.h>
 #import <UIKit/UIKit.h>
 #import <CommonCrypto/CommonDigest.h>
@@ -497,9 +497,8 @@ static const char *kRFC5054_2048_N_Hex =
     return (ec == 0);
 }
 
-#pragma mark - 【核心修复】：PKCS#1 传统私钥转换 + 证书与私钥 Modulus 严格配对校验
+#pragma mark - PKCS#1 传统私钥转换 + 证书与私钥 Modulus 严格配对校验
 
-// 确保 dev_key.pem 为 zsign 兼容的 PKCS#1 (-----BEGIN RSA PRIVATE KEY-----) 格式
 - (NSString *)generatePrivateKeyAndCSRPEMForEmail:(NSString *)email {
     NSString *keyPath = [self keyPemFilePath];
     NSString *csrPath = [[self keychainDir] stringByAppendingPathComponent:@"dev_request.csr"];
@@ -509,7 +508,6 @@ static const char *kRFC5054_2048_N_Hex =
         [self runProcess:openssl args:@[@"genrsa", @"-out", keyPath, @"2048"]];
     }
 
-    // 检查是否为 OpenSSL 3.x 默认生成的 PKCS#8 (-----BEGIN PRIVATE KEY-----)，若是则无损转为 PKCS#1 (-traditional)
     NSString *keyContent = [NSString stringWithContentsOfFile:keyPath encoding:NSUTF8StringEncoding error:nil] ?: @"";
     if (![keyContent containsString:@"BEGIN RSA PRIVATE KEY"]) {
         NSString *tradPath = [[self keychainDir] stringByAppendingPathComponent:@"dev_key_pkcs1.pem"];
@@ -539,7 +537,6 @@ static const char *kRFC5054_2048_N_Hex =
     return [csrPEM stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
 }
 
-// 校验本地 dev_cert.pem 与 dev_key.pem 的 RSA Modulus 是否 100% 匹配
 - (BOOL)isLocalCertAndKeyPairValidAndMatched {
     NSString *keyPath = [self keyPemFilePath];
     NSString *pemPath = [self certPemFilePath];
@@ -548,7 +545,6 @@ static const char *kRFC5054_2048_N_Hex =
 
     if (![[NSFileManager defaultManager] fileExistsAtPath:keyPath]) return NO;
 
-    // 确保私钥是 PKCS#1
     NSString *keyStr = [NSString stringWithContentsOfFile:keyPath encoding:NSUTF8StringEncoding error:nil] ?: @"";
     if (![keyStr containsString:@"BEGIN RSA PRIVATE KEY"]) {
         [self generatePrivateKeyAndCSRPEMForEmail:[self currentAppleIDEmail]];
@@ -599,7 +595,6 @@ static const char *kRFC5054_2048_N_Hex =
     return matched;
 }
 
-// 自动在后台拉取或重新签发与本地 dev_key.pem 100% 配对的苹果开发证书（无需重新登录！）
 - (BOOL)ensureValidSigningCertificateWithSession:(NSDictionary *)sess error:(NSError **)outError {
     NSString *teamId = sess[@"teamId"];
     NSString *email  = sess[@"email"] ?: @"dev@icloud.com";
@@ -611,7 +606,6 @@ static const char *kRFC5054_2048_N_Hex =
 
     [[AuraSignEngine sharedEngine] appendTimelineLog:@"[CERT-SYNC] 本地证书不存在或未配对，正在从苹果服务器同步匹配证书..." success:YES];
 
-    // 1. 先遍历苹果后台现有证书，看是否有与本地私钥匹配的证书
     NSDictionary *listCerts = [self sendQH65B2Request:@"ios/listAllDevelopmentCerts.action" bodyDict:@{@"teamId": teamId} session:sess outError:NULL];
     NSArray *certs = listCerts[@"certificates"];
     if ([certs isKindOfClass:[NSArray class]]) {
@@ -625,7 +619,6 @@ static const char *kRFC5054_2048_N_Hex =
         }
     }
 
-    // 2. 若后台证书均不匹配本地私钥（或后台尚无证书），先提交本地 CSR，若遇到 7460 满额则清理旧证书后重签
     NSError *csrErr = nil;
     NSDictionary *subResp = [self sendQH65B2Request:@"ios/submitDevelopmentCSR.action" bodyDict:@{
         @"teamId": teamId,
@@ -652,7 +645,6 @@ static const char *kRFC5054_2048_N_Hex =
         } session:sess outError:&csrErr];
     }
 
-    // 3. 重新拉取刚刚用本地 CSR 签发出来的真证书并校验 Modulus
     NSDictionary *newList = [self sendQH65B2Request:@"ios/listAllDevelopmentCerts.action" bodyDict:@{@"teamId": teamId} session:sess outError:NULL];
     NSArray *newCerts = newList[@"certificates"];
     if ([newCerts isKindOfClass:[NSArray class]]) {
@@ -977,7 +969,7 @@ static const char *kRFC5054_2048_N_Hex =
     });
 }
 
-#pragma mark - /services/QH65B2/ 请求、AppID注册与 zsign 签名
+#pragma mark - /services/QH65B2/ 请求、AppID注册与 zsign 原地签名
 
 - (NSDictionary *)sendQH65B2Request:(NSString *)actionPath
                            bodyDict:(NSDictionary *)bodyDict
@@ -1059,7 +1051,6 @@ static const char *kRFC5054_2048_N_Hex =
     NSDictionary *sess = [NSDictionary dictionaryWithContentsOfFile:[self sessionFilePath]];
     NSString *teamId = sess[@"teamId"];
 
-    // 【关键修复】：在下载 7 天描述文件前，先确保本地 PKCS#1 私钥与苹果后台证书 100% 配对！
     if (![self ensureValidSigningCertificateWithSession:sess error:outError]) {
         return nil;
     }
@@ -1152,8 +1143,14 @@ static const char *kRFC5054_2048_N_Hex =
         return NO;
     }
 
-    NSString *provPath = [appBundlePath stringByAppendingPathComponent:@"embedded.mobileprovision"];
-    [mobileProvisionData writeToFile:provPath atomically:YES];
+    // 将描述文件存放在 .app 外部独立路径供 -m 读取，避免 zsign 内部先删后拷同路径冲突
+    NSString *externalProvPath = [[appBundlePath stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"aura_profile.mobileprovision"];
+    [mobileProvisionData writeToFile:externalProvPath atomically:YES];
+    chmod(externalProvPath.UTF8String, 0666);
+
+    NSString *embeddedProvPath = [appBundlePath stringByAppendingPathComponent:@"embedded.mobileprovision"];
+    [mobileProvisionData writeToFile:embeddedProvPath atomically:YES];
+    chmod(embeddedProvPath.UTF8String, 0666);
 
     NSString *zsignBin = [self findBinaryNamed:@"zsign"];
     if (![[NSFileManager defaultManager] fileExistsAtPath:zsignBin]) {
@@ -1163,15 +1160,11 @@ static const char *kRFC5054_2048_N_Hex =
         return NO;
     }
 
-    NSString *signedIpaPath = [[appBundlePath stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"signed.ipa"];
-
-    // 传入 PKCS#1 格式的 dev_key.pem 与 PEM 格式的 dev_cert.pem
+    // 【核心修复】：不传 -o 和 -z，直接对 .app 目录进行原地签名！彻底避免 zsign 报 "Can't Find Payload Directory!"
     NSMutableArray<NSString *> *args = [NSMutableArray arrayWithObjects:
         @"-k", [self keyPemFilePath],
         @"-c", [self certPemFilePath],
-        @"-m", provPath,
-        @"-o", signedIpaPath,
-        @"-z", @"1",
+        @"-m", externalProvPath,
         @"-f", nil];
 
     for (NSString *dylib in dylibPaths) {
@@ -1181,16 +1174,22 @@ static const char *kRFC5054_2048_N_Hex =
 
     NSString *zsignOut = nil;
     int ret = [self runProcess:zsignBin args:args output:&zsignOut];
+    [[NSFileManager defaultManager] removeItemAtPath:externalProvPath error:nil];
+
     NSString *cleanOut = [[zsignOut componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]] componentsJoinedByString:@" "];
-    if (cleanOut.length > 140) cleanOut = [cleanOut substringToIndex:140];
+    // 截取末尾 260 个字符，确保 >>> Signed OK! 或末尾具体报错完整保留
+    if (cleanOut.length > 260) {
+        cleanOut = [cleanOut substringFromIndex:(cleanOut.length - 260)];
+    }
 
-    [[AuraSignEngine sharedEngine] appendTimelineLog:[NSString stringWithFormat:@"[ZSIGN-RUN] ret=%d, ipaExists=%d, out=%@",
-        ret, [[NSFileManager defaultManager] fileExistsAtPath:signedIpaPath], cleanOut ?: @"OK"] success:(ret == 0)];
+    BOOL signedOK = (ret == 0 || [zsignOut containsString:@"Signed OK"]);
+    [[AuraSignEngine sharedEngine] appendTimelineLog:[NSString stringWithFormat:@"[ZSIGN-RUN] ret=%d, signedOK=%d, tail=%@",
+        ret, signedOK, cleanOut ?: @"OK"] success:signedOK];
 
-    if (ret != 0 && outError) {
+    if (!signedOK && outError) {
         *outError = [NSError errorWithDomain:@"AuraSign" code:ret userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"zsign 签名失败 (%d): %@", ret, cleanOut ?: @""]}];
     }
-    return (ret == 0);
+    return signedOK;
 }
 
-@end
+@end
