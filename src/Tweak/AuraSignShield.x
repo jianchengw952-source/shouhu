@@ -38,7 +38,7 @@ static void AuraShowNativeBannerInSpringBoard(NSString *title, NSString *body) {
                 BBBulletinRequest *req = [[reqCls alloc] init];
                 NSString *uuid = [[NSUUID UUID] UUIDString];
                 req.sectionID = @"com.aurasign.pro";
-                req.title = title ?: @"灵签 Pro";
+                req.title = title ?: @"守护 Pro";
                 req.message = body ?: @"";
                 req.date = [NSDate date];
                 req.bulletinID = uuid;
@@ -90,15 +90,17 @@ static void AuraShowNativeBannerInSpringBoard(NSString *title, NSString *body) {
         UIImageView *iconView = [[UIImageView alloc] initWithFrame:CGRectMake(14, 14, 22, 22)];
         iconView.layer.cornerRadius = 5.5;
         iconView.clipsToBounds = YES;
-        if ([UIImage respondsToSelector:@selector(_applicationIconImageForBundleIdentifier:format:scale:)]) {
-            iconView.image = [UIImage _applicationIconImageForBundleIdentifier:@"com.aurasign.pro" format:2 scale:[UIScreen mainScreen].scale];
+        UIImage *customIcon = [UIImage imageWithContentsOfFile:AURA_NS_JBROOT(@"/Applications/AuraSignPro.app/AppIcon60x60@3x.png")];
+        if (!customIcon && [UIImage respondsToSelector:@selector(_applicationIconImageForBundleIdentifier:format:scale:)]) {
+            customIcon = [UIImage _applicationIconImageForBundleIdentifier:@"com.aurasign.pro" format:2 scale:[UIScreen mainScreen].scale];
         }
+        iconView.image = customIcon;
         [pill addSubview:iconView];
 
         UILabel *appNameLbl = [[UILabel alloc] initWithFrame:CGRectMake(42, 14, 140, 20)];
         appNameLbl.font = [UIFont systemFontOfSize:12.5 weight:UIFontWeightSemibold];
         appNameLbl.textColor = [UIColor colorWithWhite:1.0 alpha:0.75];
-        appNameLbl.text = @"灵签 Pro";
+        appNameLbl.text = @"守护Pro";
         [pill addSubview:appNameLbl];
 
         UILabel *nowLbl = [[UILabel alloc] initWithFrame:CGRectMake(bannerW - 64, 14, 48, 20)];
@@ -111,7 +113,7 @@ static void AuraShowNativeBannerInSpringBoard(NSString *title, NSString *body) {
         UILabel *titleLbl = [[UILabel alloc] initWithFrame:CGRectMake(14, 37, bannerW - 28, 19)];
         titleLbl.font = [UIFont systemFontOfSize:14 weight:UIFontWeightBold];
         titleLbl.textColor = [UIColor whiteColor];
-        titleLbl.text = title ?: @"灵签 Pro";
+        titleLbl.text = title ?: @"守护 Pro";
         [pill addSubview:titleLbl];
 
         UILabel *bodyLbl = [[UILabel alloc] initWithFrame:CGRectMake(14, 56, bannerW - 28, 22)];
@@ -182,7 +184,7 @@ static void AuraShowNativeBannerInSpringBoard(NSString *title, NSString *body) {
                         NSString *resTitle = success ? @"✅ 续签成功 · 可安全关机" : @"❌ 续签失败 · 切勿关机！";
                         NSString *resMsg = success
                             ? @"越狱工具已签入满血 7 天苹果真证书并通过未越狱开机校验，您现在可以放心拉动滑块关机或重启！"
-                            : [NSString stringWithFormat:@"原因：%@\n\n请先取消关机，连接网络后打开「灵签 Pro」修复后再重启！", message ?: @"网络异常"];
+                            : [NSString stringWithFormat:@"原因：%@\n\n请先取消关机，连接网络后打开「守护 Pro」修复后再重启！", message ?: @"网络异常"];
 
                         UIAlertController *resAlert = [UIAlertController alertControllerWithTitle:resTitle
                                                                                           message:resMsg

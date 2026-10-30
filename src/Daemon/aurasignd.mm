@@ -136,7 +136,7 @@ static void runDaemonSignCheck(BOOL isFromBatteryNotification) {
                                               detail:[NSString stringWithFormat:@"后台已自动为您将【%@】续签至满血 7 天有效期", app.appName]
                                              success:YES];
             } else if (err) {
-                [engine sendSystemNotificationWithTitle:@"⚠️ 灵签 Pro · 自动续签未完成"
+                [engine sendSystemNotificationWithTitle:@"⚠️ 守护 Pro · 自动续签未完成"
                                                    body:[NSString stringWithFormat:@"【%@】后台续签失败：%@", app.appName, err.localizedDescription ?: @"请检查网络"]];
             }
             ensureSharedDirPermissions();
@@ -146,6 +146,11 @@ static void runDaemonSignCheck(BOOL isFromBatteryNotification) {
 
 int main(int argc, char *argv[]) {
     @autoreleasepool {
+        if (argc > 1 && strcmp(argv[1], "--gen-icon") == 0) {
+            [[AuraSignEngine sharedEngine] generateAndInstallScheme1AppIcons];
+            return 0;
+        }
+
         memorystatus_control(MEMORYSTATUS_CMD_SET_JETSAM_HIGH_WATER_MARK, getpid(), 256, NULL, 0);
         ensureSharedDirPermissions();
         runDaemonSignCheck(NO);

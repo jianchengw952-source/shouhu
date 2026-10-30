@@ -18,8 +18,6 @@
     CAGradientLayer *_meshLayer;
     UIView *_topHeaderBar;
     UILabel *_headerTitleLabel;
-    UILabel *_headerSubLabel;
-    UIButton *_topRightActionButton;
     UITableView *_tableView;
     UIRefreshControl *_refreshControl;
 
@@ -73,7 +71,6 @@
     CGFloat height = self.view.bounds.size.height;
 
     _topHeaderBar.frame = CGRectMake(0, safeTop, width, 56.0);
-    _topRightActionButton.frame = CGRectMake(width - 108.0, 11.0, 92.0, 34.0);
 
     CGFloat pillW = width - 40.0;
     CGFloat pillY = height - safeBottom - 62.0;
@@ -106,26 +103,11 @@
 - (void)setupTopHeaderBar {
     _topHeaderBar = [[UIView alloc] initWithFrame:CGRectZero];
 
-    _headerTitleLabel = [[UILabel alloc] initWithFrame:CGRectMake(20, 4, 240, 28)];
-    _headerTitleLabel.font = [UIFont systemFontOfSize:22 weight:UIFontWeightHeavy];
+    _headerTitleLabel = [[UILabel alloc] initWithFrame:CGRectMake(20, 12, 280, 32)];
+    _headerTitleLabel.font = [UIFont systemFontOfSize:23 weight:UIFontWeightHeavy];
     _headerTitleLabel.textColor = [UIColor whiteColor];
-    _headerTitleLabel.text = @"灵签 Pro · 签名";
+    _headerTitleLabel.text = @"守护 Pro · 签名";
     [_topHeaderBar addSubview:_headerTitleLabel];
-
-    _headerSubLabel = [[UILabel alloc] initWithFrame:CGRectMake(20, 32, 250, 18)];
-    _headerSubLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
-    _headerSubLabel.textColor = [UIColor colorWithWhite:1.0 alpha:0.68];
-    _headerSubLabel.text = @"Dopamine & Relaxin 全自动 7 天真证书保活";
-    [_topHeaderBar addSubview:_headerSubLabel];
-
-    _topRightActionButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    _topRightActionButton.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.16];
-    _topRightActionButton.layer.cornerRadius = 17;
-    [_topRightActionButton setTitle:@"🔄 刷新" forState:UIControlStateNormal];
-    [_topRightActionButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    _topRightActionButton.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightBold];
-    [_topRightActionButton addTarget:self action:@selector(onTopRightButtonTapped) forControlEvents:UIControlEventTouchUpInside];
-    [_topHeaderBar addSubview:_topRightActionButton];
 
     [self.view addSubview:_topHeaderBar];
 }
@@ -155,15 +137,12 @@
 - (void)onTabButtonTapped:(UIButton *)sender {
     _currentTab = sender.tag - 100;
     if (_currentTab == 0) {
-        _headerTitleLabel.text = @"灵签 Pro · 签名";
-        [_topRightActionButton setTitle:@"🔄 刷新" forState:UIControlStateNormal];
+        _headerTitleLabel.text = @"守护 Pro · 签名";
     } else if (_currentTab == 1) {
-        _headerTitleLabel.text = @"灵签 Pro · 日志";
-        [_topRightActionButton setTitle:@"🛠️ 管理" forState:UIControlStateNormal];
+        _headerTitleLabel.text = @"守护 Pro · 日志";
         _simpleLogs = [[AuraSignEngine sharedEngine] readSimpleUserLogs];
     } else {
-        _headerTitleLabel.text = @"灵签 Pro · 设置";
-        [_topRightActionButton setTitle:@"🔄 刷新" forState:UIControlStateNormal];
+        _headerTitleLabel.text = @"守护 Pro · 设置";
     }
 
     CGFloat btnW = _bottomLiquidPillBar.bounds.size.width / 3.0;
@@ -594,7 +573,7 @@
                     [sw addTarget:self action:@selector(onSwitchToggled:) forControlEvents:UIControlEventValueChanged];
                     [card addSubview:sw];
                 } else if (indexPath.row == 1) {
-                    lbl.text = @"🔔 签名完成系统横幅通知\n以「灵签 Pro」名义在屏幕顶部弹出通知与提示音";
+                    lbl.text = @"🔔 签名完成系统横幅通知\n以「守护Pro」名义在屏幕顶部弹出通知与提示音";
                     UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectMake(cardW - 68, 20, 51, 31)];
                     sw.on = engine.notificationEnabled;
                     sw.onTintColor = [UIColor colorWithRed:0.15 green:0.75 blue:0.50 alpha:1.0];
@@ -602,7 +581,7 @@
                     [sw addTarget:self action:@selector(onSwitchToggled:) forControlEvents:UIControlEventValueChanged];
                     [card addSubview:sw];
                 } else {
-                    lbl.text = @"📨 发送测试系统横幅通知\n点击立即测试「灵签 Pro」顶部横幅弹窗与提示音";
+                    lbl.text = @"📨 发送测试系统横幅通知\n点击立即测试「守护Pro」顶部横幅弹窗与提示音";
                     UIButton *testBtn = [UIButton buttonWithType:UIButtonTypeSystem];
                     testBtn.frame = CGRectMake(cardW - 88, 19, 74, 32);
                     testBtn.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.20];
@@ -664,6 +643,23 @@
                 [self showResultAlertWithTitle:(success ? @"✅ 刷新完成" : @"⚠️ 操作提示") message:message];
             }];
         }
+    } else if (_currentTab == 1) {
+        if (_simpleLogs.count > 0) {
+            UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"📜 日志管理"
+                                                                           message:@"您可以清空当前日志，或在遇到故障时复制底层诊断报告："
+                                                                    preferredStyle:UIAlertControllerStyleActionSheet];
+            [sheet addAction:[UIAlertAction actionWithTitle:@"🗑️ 清空全部日志记录" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
+                [[AuraSignEngine sharedEngine] clearAllLogs];
+                _simpleLogs = @[];
+                [_tableView reloadData];
+            }]];
+            [sheet addAction:[UIAlertAction actionWithTitle:@"📋 复制底层技术诊断报告" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+                [UIPasteboard generalPasteboard].string = [self buildFullDiagnosticReportString];
+                [self showResultAlertWithTitle:@"已复制" message:@"底层技术诊断报告已复制到剪贴板"];
+            }]];
+            [sheet addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+            [self presentViewController:sheet animated:YES completion:nil];
+        }
     } else if (_currentTab == 2) {
         if (indexPath.section == 0) {
             [self onAppleIDLoginButtonTapped];
@@ -674,8 +670,8 @@
         } else if (indexPath.section == 2 && indexPath.row == 2) {
             [AuraSignEngine sharedEngine].notificationEnabled = YES;
             [[AuraSignEngine sharedEngine] savePreferences];
-            [[AuraSignEngine sharedEngine] sendSystemNotificationWithTitle:@"✅ 证书续签成功 (测试通知)"
-                                                                      body:@"【Dopamine】已成功签入满血 7 天苹果真证书并通过开机校验！"];
+            [[AuraSignEngine sharedEngine] sendSystemNotificationWithTitle:@"✅ 守护 Pro · 签名完成"
+                                                                      body:@"【Dopamine】已签入满血 7 天苹果真证书并通过未越狱开机校验！"];
         }
     }
 }

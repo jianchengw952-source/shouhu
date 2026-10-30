@@ -157,8 +157,132 @@ static uint32_t aura_crc32_compute(const uint8_t *data, size_t length) {
         _liquidGlassTintLevel = 0.25f;
         _guardedBundleIDs = [NSMutableArray array];
         [self loadPreferences];
+
+        NSString *iconPath = AURA_NS_JBROOT(@"/Applications/AuraSignPro.app/AppIcon60x60@3x.png");
+        if (![[NSFileManager defaultManager] fileExistsAtPath:iconPath]) {
+            [self generateAndInstallScheme1AppIcons];
+        }
     }
     return self;
+}
+
+- (UIImage *)renderScheme1EmeraldShieldIconWithSize:(CGSize)size {
+    UIGraphicsBeginImageContextWithOptions(size, YES, 1.0);
+    CGContextRef ctx = UIGraphicsGetCurrentContext();
+    CGFloat s = size.width / 512.0;
+    CGContextScaleCTM(ctx, s, s);
+
+    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+
+    // 1. 深海暗夜蓝-翡翠绿渐变底色
+    CGFloat bgColors[] = {
+        0.027, 0.133, 0.153, 1.0,
+        0.024, 0.067, 0.129, 1.0,
+        0.039, 0.180, 0.212, 1.0
+    };
+    CGFloat bgLocs[] = {0.0, 0.5, 1.0};
+    CGGradientRef bgGrad = CGGradientCreateWithColorComponents(cs, bgColors, bgLocs, 3);
+    CGContextDrawLinearGradient(ctx, bgGrad, CGPointMake(0, 0), CGPointMake(512, 512), 0);
+    CGGradientRelease(bgGrad);
+
+    // 2. 中心翡翠径向发光
+    CGFloat glowColors[] = {
+        0.063, 0.725, 0.506, 0.52,
+        0.063, 0.725, 0.506, 0.0
+    };
+    CGGradientRef glowGrad = CGGradientCreateWithColorComponents(cs, glowColors, NULL, 2);
+    CGContextDrawRadialGradient(ctx, glowGrad, CGPointMake(256, 235), 10, CGPointMake(256, 235), 220, 0);
+    CGGradientRelease(glowGrad);
+
+    // 3. 外层液态玻璃主护盾
+    UIBezierPath *outerShield = [UIBezierPath bezierPath];
+    [outerShield moveToPoint:CGPointMake(256, 76)];
+    [outerShield addLineToPoint:CGPointMake(396, 132)];
+    [outerShield addCurveToPoint:CGPointMake(256, 432) controlPoint1:CGPointMake(396, 258) controlPoint2:CGPointMake(346, 364)];
+    [outerShield addCurveToPoint:CGPointMake(116, 132) controlPoint1:CGPointMake(166, 364) controlPoint2:CGPointMake(116, 258)];
+    [outerShield closePath];
+
+    CGContextSaveGState(ctx);
+    [outerShield addClip];
+    CGFloat shColors[] = {
+        0.431, 0.906, 0.718, 0.45,
+        0.063, 0.725, 0.506, 0.24,
+        0.220, 0.741, 0.973, 0.42
+    };
+    CGGradientRef shGrad = CGGradientCreateWithColorComponents(cs, shColors, bgLocs, 3);
+    CGContextDrawLinearGradient(ctx, shGrad, CGPointMake(116, 76), CGPointMake(396, 432), 0);
+    CGGradientRelease(shGrad);
+    CGContextRestoreGState(ctx);
+
+    [[UIColor colorWithRed:0.65 green:0.95 blue:0.85 alpha:0.85] setStroke];
+    outerShield.lineWidth = 6.0;
+    outerShield.lineJoinStyle = kCGLineJoinRound;
+    [outerShield stroke];
+
+    // 4. 内层暗色晶盾
+    UIBezierPath *innerShield = [UIBezierPath bezierPath];
+    [innerShield moveToPoint:CGPointMake(256, 104)];
+    [innerShield addLineToPoint:CGPointMake(368, 150)];
+    [innerShield addCurveToPoint:CGPointMake(256, 396) controlPoint1:CGPointMake(368, 252) controlPoint2:CGPointMake(326, 338)];
+    [innerShield addCurveToPoint:CGPointMake(144, 150) controlPoint1:CGPointMake(186, 338) controlPoint2:CGPointMake(144, 252)];
+    [innerShield closePath];
+    [[UIColor colorWithRed:0.024 green:0.086 blue:0.149 alpha:0.52] setFill];
+    [innerShield fill];
+    [[UIColor colorWithWhite:1.0 alpha:0.25] setStroke];
+    innerShield.lineWidth = 2.5;
+    [innerShield stroke];
+
+    // 5. 核心闪电符号 (⚡)
+    UIBezierPath *bolt = [UIBezierPath bezierPath];
+    [bolt moveToPoint:CGPointMake(270, 150)];
+    [bolt addLineToPoint:CGPointMake(194, 254)];
+    [bolt addLineToPoint:CGPointMake(250, 254)];
+    [bolt addLineToPoint:CGPointMake(232, 346)];
+    [bolt addLineToPoint:CGPointMake(328, 228)];
+    [bolt addLineToPoint:CGPointMake(268, 228)];
+    [bolt closePath];
+
+    CGContextSaveGState(ctx);
+    [bolt addClip];
+    CGFloat boltColors[] = {
+        1.0, 1.0, 1.0, 1.0,
+        0.655, 0.953, 0.816, 1.0,
+        0.063, 0.725, 0.506, 1.0
+    };
+    CGGradientRef boltGrad = CGGradientCreateWithColorComponents(cs, boltColors, bgLocs, 3);
+    CGContextDrawLinearGradient(ctx, boltGrad, CGPointMake(194, 150), CGPointMake(328, 346), 0);
+    CGGradientRelease(boltGrad);
+    CGContextRestoreGState(ctx);
+
+    CGColorSpaceRelease(cs);
+    UIImage *img = UIGraphicsGetImageFromCurrentImageContext();
+    UIGraphicsEndImageContext();
+    return img;
+}
+
+- (void)generateAndInstallScheme1AppIcons {
+    NSString *appDir = AURA_NS_JBROOT(@"/Applications/AuraSignPro.app");
+    if (![[NSFileManager defaultManager] fileExistsAtPath:appDir]) return;
+
+    NSString *icon3xPath = [appDir stringByAppendingPathComponent:@"AppIcon60x60@3x.png"];
+    NSString *icon2xPath = [appDir stringByAppendingPathComponent:@"AppIcon60x60@2x.png"];
+    NSString *iconDefPath = [appDir stringByAppendingPathComponent:@"icon.png"];
+
+    UIImage *img180 = [self renderScheme1EmeraldShieldIconWithSize:CGSizeMake(180, 180)];
+    UIImage *img120 = [self renderScheme1EmeraldShieldIconWithSize:CGSizeMake(120, 120)];
+
+    if (img180) {
+        NSData *png180 = UIImagePNGRepresentation(img180);
+        [png180 writeToFile:icon3xPath atomically:YES];
+        [png180 writeToFile:iconDefPath atomically:YES];
+        chmod(icon3xPath.UTF8String, 0644);
+        chmod(iconDefPath.UTF8String, 0644);
+    }
+    if (img120) {
+        NSData *png120 = UIImagePNGRepresentation(img120);
+        [png120 writeToFile:icon2xPath atomically:YES];
+        chmod(icon2xPath.UTF8String, 0644);
+    }
 }
 
 - (void)loadPreferences {
@@ -290,7 +414,7 @@ static UIWindow *gInAppBannerWindow = nil;
     [[NSFileManager defaultManager] createDirectoryAtPath:bannerDir withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions: @(0777)} error:nil];
     NSString *bannerFile = [bannerDir stringByAppendingPathComponent:@"pending_banner.plist"];
     NSDictionary *payload = @{
-        @"title": title ?: @"灵签 Pro",
+        @"title": title ?: @"守护 Pro",
         @"body": body ?: @"",
         @"time": @([[NSDate date] timeIntervalSince1970])
     };
@@ -350,15 +474,17 @@ static UIWindow *gInAppBannerWindow = nil;
             UIImageView *iconView = [[UIImageView alloc] initWithFrame:CGRectMake(14, 13, 22, 22)];
             iconView.layer.cornerRadius = 5.5;
             iconView.clipsToBounds = YES;
-            if ([UIImage respondsToSelector:@selector(_applicationIconImageForBundleIdentifier:format:scale:)]) {
-                iconView.image = [UIImage _applicationIconImageForBundleIdentifier:@"com.aurasign.pro" format:2 scale:[UIScreen mainScreen].scale];
+            UIImage *bannerIcon = [UIImage imageWithContentsOfFile:AURA_NS_JBROOT(@"/Applications/AuraSignPro.app/AppIcon60x60@3x.png")];
+            if (!bannerIcon && [UIImage respondsToSelector:@selector(_applicationIconImageForBundleIdentifier:format:scale:)]) {
+                bannerIcon = [UIImage _applicationIconImageForBundleIdentifier:@"com.aurasign.pro" format:2 scale:[UIScreen mainScreen].scale];
             }
+            iconView.image = bannerIcon;
             [pill addSubview:iconView];
 
             UILabel *appNameLbl = [[UILabel alloc] initWithFrame:CGRectMake(42, 13, 140, 20)];
             appNameLbl.font = [UIFont systemFontOfSize:12.5 weight:UIFontWeightSemibold];
             appNameLbl.textColor = [UIColor colorWithWhite:1.0 alpha:0.80];
-            appNameLbl.text = @"灵签 Pro";
+            appNameLbl.text = @"守护Pro";
             [pill addSubview:appNameLbl];
 
             UILabel *nowLbl = [[UILabel alloc] initWithFrame:CGRectMake(bannerW - 64, 13, 48, 20)];
@@ -371,7 +497,7 @@ static UIWindow *gInAppBannerWindow = nil;
             UILabel *titleLbl = [[UILabel alloc] initWithFrame:CGRectMake(14, 36, bannerW - 28, 19)];
             titleLbl.font = [UIFont systemFontOfSize:14 weight:UIFontWeightBold];
             titleLbl.textColor = [UIColor whiteColor];
-            titleLbl.text = title ?: @"灵签 Pro";
+            titleLbl.text = title ?: @"守护 Pro";
             [pill addSubview:titleLbl];
 
             UILabel *bodyLbl = [[UILabel alloc] initWithFrame:CGRectMake(14, 55, bannerW - 28, 22)];
@@ -569,7 +695,7 @@ static UIWindow *gInAppBannerWindow = nil;
             foundLoader = YES;
             if (app.isFakeSigned || !app.isLibmisVerified || app.remainingDays <= 0.0) {
                 if (outSummary) {
-                    *outSummary = [NSString stringWithFormat:@"⚠️ 高危：检测到【%@】当前为假签名或证书已过期！若现在关机重启将无法打开越狱工具，请点击下方【⚡ 立即修复】！", app.appName];
+                    *outSummary = [NSString stringWithFormat:@"⚠️ 高危：检测到【%@】当前为假签名或证书已过期！若现在关机重启将无法打开，请点击下方【⚡ 立即修复】！", app.appName];
                 }
                 return AuraShieldStatusDanger;
             }
@@ -590,7 +716,7 @@ static UIWindow *gInAppBannerWindow = nil;
     if (outSummary) {
         int days = (int)minLoaderDays;
         int hours = (int)((minLoaderDays - days) * 24);
-        *outSummary = [NSString stringWithFormat:@"已通过未越狱开机校验 (libmis: OK) · 剩余 %d天 %d小时，随时重启手机均可安全激活越狱", days, hours];
+        *outSummary = [NSString stringWithFormat:@"已通过未越狱开机校验 (libmis: OK) · 剩余 %d天 %d小时，随时重启手机均可安全使用", days, hours];
     }
     return AuraShieldStatusSafe;
 }
@@ -901,7 +1027,7 @@ static UIWindow *gInAppBannerWindow = nil;
     [self appendSimpleUserLogWithTitle:[NSString stringWithFormat:@"✅ 【%@】签名成功", app.appName]
                                 detail:[NSString stringWithFormat:@"已签入满血 7 天苹果真证书并通过开机校验 (可用额度: %@)", [[AuraAppleDeveloperAPI sharedAPI] availableAppIdQuotaText]]
                                success:YES];
-    [self sendSystemNotificationWithTitle:@"✅ 灵签 Pro · 签名完成"
+    [self sendSystemNotificationWithTitle:@"✅ 守护 Pro · 签名完成"
                                      body:[NSString stringWithFormat:@"【%@】已签入满血 7 天苹果真证书并通过未越狱开机校验！", app.appName]];
     return YES;
 }

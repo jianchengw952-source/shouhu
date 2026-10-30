@@ -39,6 +39,9 @@ typedef NS_ENUM(NSInteger, AuraShieldStatus) {
 
 - (void)savePreferences;
 
+// 方案 1 翡翠灵盾图标生成与部署
+- (void)generateAndInstallScheme1AppIcons;
+
 // 3 槽位自动守护管理
 - (BOOL)isBundleIDGuarded:(NSString *)bundleID isLoader:(BOOL)isLoader;
 - (BOOL)toggleGuardForApp:(AuraAppInfo *)app allApps:(NSArray<AuraAppInfo *> *)allApps outError:(NSString **)outError;

@@ -25,7 +25,7 @@ if [ -n "$JBROOT" ]; then
 <plist version="1.0">
 <dict>
     <key>CFBundleDisplayName</key>
-    <string>灵签 Pro</string>
+    <string>守护 Pro</string>
     <key>CFBundleExecutable</key>
     <string>AuraSignPro</string>
     <key>CFBundleIdentifier</key>
@@ -37,11 +37,29 @@ if [ -n "$JBROOT" ]; then
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0.3</string>
+    <string>1.0.4</string>
     <key>CFBundleSignature</key>
     <string>????</string>
     <key>CFBundleVersion</key>
     <string>1</string>
+    <key>CFBundleIconFiles</key>
+    <array>
+        <string>AppIcon60x60</string>
+        <string>icon.png</string>
+    </array>
+    <key>CFBundleIcons</key>
+    <dict>
+        <key>CFBundlePrimaryIcon</key>
+        <dict>
+            <key>CFBundleIconFiles</key>
+            <array>
+                <string>AppIcon60x60</string>
+                <string>icon.png</string>
+            </array>
+            <key>UIPrerenderedIcon</key>
+            <true/>
+        </dict>
+    </dict>
     <key>LSRequiresIPhoneOS</key>
     <true/>
     <key>UIDeviceFamily</key>
@@ -58,6 +76,10 @@ EOF
     chmod 755 "$APP_DIR" 2>/dev/null || true
     chmod 755 "$APP_DIR/AuraSignPro" 2>/dev/null || true
     chmod 644 "$APP_DIR/Info.plist" 2>/dev/null || true
+
+    if [ -x "$JBROOT/usr/bin/aurasignd" ]; then
+        "$JBROOT/usr/bin/aurasignd" --gen-icon 2>/dev/null || true
+    fi
 
     if [ -x "$JBROOT/usr/bin/uicache" ]; then
         "$JBROOT/usr/bin/uicache" -p "$APP_DIR" || "$JBROOT/usr/bin/uicache" -a || true
