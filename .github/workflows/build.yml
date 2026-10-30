@@ -24,6 +24,7 @@ jobs:
           git clone https://github.com/zhlynn/zsign.git /tmp/zsign
           cd /tmp/zsign
           git checkout 27016df1150eeaf27e8d8c148ccb3cad10d31e73
+          sed -i.bak 's/int status = system(szCmd);/int status = -1;/g' common/common.cpp
           OPENSSL_PREFIX="$(brew --prefix openssl@3)"
           IOS_SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
 
@@ -33,7 +34,7 @@ jobs:
             xcrun --sdk iphoneos clang++ -arch arm64 -std=c++14 -O2 \
               -isysroot "$IOS_SDK" -miphoneos-version-min=15.0 \
               -I"$OPENSSL_PREFIX/include" -I. -I./common \
-              -Wno-deprecated-declarations -c "$src" -o "$obj"
+              -Wno-deprecated-declarations -Wno-availability -Wno-error=availability -c "$src" -o "$obj"
           done
 
           nm -gU "$OPENSSL_PREFIX/lib/libcrypto.3.dylib" | awk '{print $3}' | sed 's/^_//' | sort -u > /tmp/all_crypto_exports.txt
