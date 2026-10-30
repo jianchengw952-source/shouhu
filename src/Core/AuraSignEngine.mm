@@ -707,8 +707,13 @@ static UIWindow *gInAppBannerWindow = nil;
 }
 
 - (BOOL)installAndSignIPAFileAtPath:(NSString *)ipaFilePath error:(NSError **)outError {
+    NSString *fileName = ipaFilePath.lastPathComponent ?: @"IPA安装包";
     if (![[NSFileManager defaultManager] fileExistsAtPath:ipaFilePath]) {
-        if (outError) *outError = [NSError errorWithDomain:@"AuraSign" code:404 userInfo:@{NSLocalizedDescriptionKey: @"找不到待签名的 IPA 安装包文件"}];
+        NSString *msg = @"找不到待签名的 IPA 安装包文件";
+        [self appendSimpleUserLogWithTitle:[NSString stringWithFormat:@"❌ 导入【%@】失败", fileName]
+                                    detail:[NSString stringWithFormat:@"原因：%@", msg]
+                                   success:NO];
+        if (outError) *outError = [NSError errorWithDomain:@"AuraSign" code:404 userInfo:@{NSLocalizedDescriptionKey: msg}];
         return NO;
     }
 
@@ -737,18 +742,21 @@ static UIWindow *gInAppBannerWindow = nil;
 
     if (!foundAppPath) {
         [[NSFileManager defaultManager] removeItemAtPath:unzipDir error:nil];
-        if (outError) *outError = [NSError errorWithDomain:@"AuraSign" code:422 userInfo:@{NSLocalizedDescriptionKey: @"解压 IPA 失败：包内未找到 Payload/*.app 目录"}];
+        NSString *msg = @"解压 IPA 失败：安装包损坏或未找到 Payload/*.app 目录";
+        [self appendSimpleUserLogWithTitle:[NSString stringWithFormat:@"❌ 解压【%@】失败", fileName]
+                                    detail:[NSString stringWithFormat:@"原因：%@", msg]
+                                   success:NO];
+        if (outError) *outError = [NSError errorWithDomain:@"AuraSign" code:422 userInfo:@{NSLocalizedDescriptionKey: msg}];
         return NO;
     }
 
     NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:[foundAppPath stringByAppendingPathComponent:@"Info.plist"]];
     AuraAppInfo *tempApp = [[AuraAppInfo alloc] init];
-    tempApp.appName = info[@"CFBundleDisplayName"] ?: info[@"CFBundleName"] ?: @"App";
+    tempApp.appName = info[@"CFBundleDisplayName"] ?: info[@"CFBundleName"] ?: fileName;
     tempApp.bundleID = info[@"CFBundleIdentifier"] ?: @"com.aurasign.imported";
     tempApp.version = info[@"CFBundleShortVersionString"] ?: @"1.0";
     tempApp.bundlePath = foundAppPath;
     tempApp.isJailbreakLoader = ([tempApp.bundleID.lowercaseString containsString:@"dopamine"] || [tempApp.bundleID.lowercaseString containsString:@"relaxin"]);
-    tempApp.isGuarded = [self isBundleIDGuarded:tempApp.bundleID isLoader:tempApp.isJailbreakLoader];
 
     BOOL ok = [self fastResignApp:tempApp error:outError];
     [[NSFileManager defaultManager] removeItemAtPath:unzipDir error:nil];
@@ -756,34 +764,34 @@ static UIWindow *gInAppBannerWindow = nil;
 }
 
 - (BOOL)fastResignApp:(AuraAppInfo *)app error:(NSError **)outError {
-    [self setSigningLockActive:YES];
-    BOOL success = [self _internalFastResignApp:app error:outError];
-    [self setSigningLockActive:NO];
-    return success;
-}
-
-- (BOOL)_internalFastResignApp:(AuraAppInfo *)app error:(NSError **)outError {
     AuraAppleDeveloperAPI *api = [AuraAppleDeveloperAPI sharedAPI];
     if (![api hasValidAccountInKeychain]) {
-        if (outError) {
-            *outError = [NSError errorWithDomain:@"AuraSign" code:401 userInfo:@{NSLocalizedDescriptionKey: @"您尚未绑定 Apple ID！请先在【守护中心】点击【立即登录】绑定您的免费 Apple ID"}];
-        }
-        [self appendSimpleUserLogWithTitle:[NSString stringWithFormat:@"❌ 【%@】签名未完成", app.appName]
-                                    detail:@"原因：尚未绑定 Apple ID"
+        NSString *msg = @"尚未绑定 Apple ID，请先前往底部「⚙️ 设置」页登录您的免费 Apple ID";
+        [self appendSimpleUserLogWithTitle:[NSString stringWithFormat:@"❌ 【%@】签名未开始", app.appName]
+                                    detail:[NSString stringWithFormat:@"原因：%@", msg]
                                    success:NO];
+        if (outError) {
+            *outError = [NSError errorWithDomain:@"AuraSign" code:401 userInfo:@{NSLocalizedDescriptionKey: msg}];
+        }
         return NO;
     }
 
+    [self setSigningLockActive:YES];
+
     NSString *requestedBundleID = app.bundleID;
     NSString *resolvedBundleID = requestedBundleID;
+    NSError *profErr = nil;
     NSData *realProfileData = [api requestReal7DayProvisioningProfileForBundleID:requestedBundleID
                                                                          appName:app.appName
                                                                outResolvedBundle:&resolvedBundleID
-                                                                           error:outError];
+                                                                           error:&profErr];
     if (!realProfileData || realProfileData.length == 0) {
-        NSString *errDesc = (outError && *outError) ? (*outError).localizedDescription : @"获取 7 天描述文件失败";
-        [self appendSimpleUserLogWithTitle:[NSString stringWithFormat:@"❌ 【%@】签名未完成", app.appName]
-                                    detail:[NSString stringWithFormat:@"原因：%@", errDesc]
+        [self setSigningLockActive:NO];
+        if (outError) *outError = profErr;
+        NSString *errMsg = profErr.localizedDescription ?: @"从苹果服务器获取 7 天描述文件失败（请检查网络或本周 10 个 AppID 额度）";
+        [self appendTimelineLog:[NSString stringWithFormat:@"[SIGN-ERR] 【%@】获取描述文件失败：%@", app.appName, errMsg] success:NO];
+        [self appendSimpleUserLogWithTitle:[NSString stringWithFormat:@"❌ 【%@】获取证书失败", app.appName]
+                                    detail:[NSString stringWithFormat:@"原因：%@", errMsg]
                                    success:NO];
         return NO;
     }
@@ -804,7 +812,7 @@ static UIWindow *gInAppBannerWindow = nil;
 
     [self recursivelyFixInstalldPermissions:stageRoot];
 
-    if (self.smartStripExtensions && !app.isJailbreakLoader) {
+    if (!app.isJailbreakLoader) {
         [[NSFileManager defaultManager] removeItemAtPath:[stagedAppPath stringByAppendingPathComponent:@"PlugIns"] error:nil];
         [[NSFileManager defaultManager] removeItemAtPath:[stagedAppPath stringByAppendingPathComponent:@"Watch"] error:nil];
     }
@@ -818,12 +826,15 @@ static UIWindow *gInAppBannerWindow = nil;
         [infoDict writeToFile:infoPlistPath atomically:YES];
     }
 
-    BOOL zsignOK = [api performRealZSignOnAppBundle:stagedAppPath profileData:realProfileData error:outError];
+    NSError *zsignErr = nil;
+    BOOL zsignOK = [api performRealZSignOnAppBundle:stagedAppPath profileData:realProfileData error:&zsignErr];
     if (!zsignOK) {
         [[NSFileManager defaultManager] removeItemAtPath:stageRoot error:nil];
-        NSString *errMsg = (outError && *outError) ? (*outError).localizedDescription : @"zsign 二进制签名未通过";
+        [self setSigningLockActive:NO];
+        if (outError) *outError = zsignErr;
+        NSString *errMsg = zsignErr.localizedDescription ?: @"zsign 二进制签名未通过";
         [self appendTimelineLog:[NSString stringWithFormat:@"[ZSIGN-ERR] 【%@】签名失败：%@", app.appName, errMsg] success:NO];
-        [self appendSimpleUserLogWithTitle:[NSString stringWithFormat:@"❌ 【%@】签名未完成", app.appName]
+        [self appendSimpleUserLogWithTitle:[NSString stringWithFormat:@"❌ 【%@】签名未通过", app.appName]
                                     detail:[NSString stringWithFormat:@"原因：%@", errMsg]
                                    success:NO];
         return NO;
@@ -831,7 +842,6 @@ static UIWindow *gInAppBannerWindow = nil;
 
     [self recursivelyFixInstalldPermissions:stageRoot];
 
-    // 先打包出一份独立的 signed.ipa（防止 installd 移动/消耗目录导致备选通道无文件可用）
     NSString *signedIpaPath = [stageRoot stringByAppendingPathComponent:@"signed.ipa"];
     BOOL ipaCreated = [self createNativeIPAFromStageRoot:stageRoot toIpaPath:signedIpaPath];
 
@@ -840,8 +850,6 @@ static UIWindow *gInAppBannerWindow = nil;
     BOOL installSuccess = NO;
     NSError *lsError = nil;
 
-    // 【核心修复】：必须传入 @"AllowInstallLocalProvisioned": @YES，否则 installd 会拒绝免费 7 天个人证书！
-    // 通道 1：通过 signed.ipa + AllowInstallLocalProvisioned=YES 标准安装
     if (ipaCreated && [[NSFileManager defaultManager] fileExistsAtPath:signedIpaPath] &&
         [workspace respondsToSelector:@selector(installApplication:withOptions:error:)]) {
         NSDictionary *ipaOpts = @{
@@ -854,7 +862,6 @@ static UIWindow *gInAppBannerWindow = nil;
             app.appName, installSuccess, lsError.localizedDescription ?: @"nil"] success:installSuccess];
     }
 
-    // 通道 2：若通道 1 未通过，通过 stagedAppPath (.app 目录) + AllowInstallLocalProvisioned=YES + Developer 模式安装
     if (!installSuccess && [[NSFileManager defaultManager] fileExistsAtPath:stagedAppPath] &&
         [workspace respondsToSelector:@selector(installApplication:withOptions:error:)]) {
         lsError = nil;
@@ -870,32 +877,30 @@ static UIWindow *gInAppBannerWindow = nil;
     }
 
     [[NSFileManager defaultManager] removeItemAtPath:stageRoot error:nil];
+    [self setSigningLockActive:NO];
 
     if (!installSuccess) {
-        if (outError) {
-            *outError = lsError ?: [NSError errorWithDomain:@"AuraSign" code:-1 userInfo:@{NSLocalizedDescriptionKey: @"LSApplicationWorkspace 安装未通过，请复制诊断日志查看详情"}];
-        }
-        NSString *errDesc = (outError && *outError) ? (*outError).localizedDescription : @"安装未通过";
-        [self appendSimpleUserLogWithTitle:[NSString stringWithFormat:@"❌ 【%@】签名未完成", app.appName]
-                                    detail:[NSString stringWithFormat:@"原因：%@", errDesc]
+        NSString *installErrMsg = lsError.localizedDescription ?: @"系统 installd 拒绝安装（请检查是否已满 3 个免费证书应用上限）";
+        [self appendSimpleUserLogWithTitle:[NSString stringWithFormat:@"❌ 【%@】安装未通过", app.appName]
+                                    detail:[NSString stringWithFormat:@"原因：%@", installErrMsg]
                                    success:NO];
+        if (outError) {
+            *outError = lsError ?: [NSError errorWithDomain:@"AuraSign" code:-1 userInfo:@{NSLocalizedDescriptionKey: installErrMsg}];
+        }
         return NO;
     }
 
-    // 当重签后的 resolvedBundleID 与原 app.bundleID 不同时，若原 app.bundleID 在 _guardedBundleIDs 中，自动将 resolvedBundleID 也加入 _guardedBundleIDs
-    if (![resolvedBundleID isEqualToString:app.bundleID] && [_guardedBundleIDs containsObject:app.bundleID]) {
-        if (![_guardedBundleIDs containsObject:resolvedBundleID]) {
-            [_guardedBundleIDs addObject:resolvedBundleID];
-            [self savePreferences];
-        }
+    // 若原本已开启守护且 BundleID 加上了 .TeamID 后缀，同步更新守护列表
+    if ([_guardedBundleIDs containsObject:app.bundleID] && ![_guardedBundleIDs containsObject:resolvedBundleID]) {
+        [_guardedBundleIDs removeObject:app.bundleID];
+        [_guardedBundleIDs addObject:resolvedBundleID];
+        [self savePreferences];
     }
 
     [self appendTimelineLog:[NSString stringWithFormat:@"🎉 [RESIGN-SUCCESS] 【%@】已成功签入 7 天苹果真证书并完成安装！(BundleID:%@)", app.appName, resolvedBundleID] success:YES];
-
     [self appendSimpleUserLogWithTitle:[NSString stringWithFormat:@"✅ 【%@】签名成功", app.appName]
-                                detail:@"已成功签入满血 7 天苹果真证书并通过开机校验，重启手机可正常打开"
+                                detail:[NSString stringWithFormat:@"已签入满血 7 天苹果真证书并通过开机校验 (可用额度: %@)", [[AuraAppleDeveloperAPI sharedAPI] availableAppIdQuotaText]]
                                success:YES];
-
     [self sendSystemNotificationWithTitle:@"✅ 灵签 Pro · 签名完成"
                                      body:[NSString stringWithFormat:@"【%@】已签入满血 7 天苹果真证书并通过未越狱开机校验！", app.appName]];
     return YES;

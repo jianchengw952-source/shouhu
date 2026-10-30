@@ -161,6 +161,9 @@ static const char *kRFC5054_2048_N_Hex =
     [[NSFileManager defaultManager] removeItemAtPath:[self p12FilePath] error:nil];
     [[NSFileManager defaultManager] removeItemAtPath:[self cerFilePath] error:nil];
     [[NSFileManager defaultManager] removeItemAtPath:[self certPemFilePath] error:nil];
+    [[AuraSignEngine sharedEngine] appendSimpleUserLogWithTitle:@"🚪 已退出 Apple ID"
+                                                         detail:@"已清除本地保存的 Apple ID 账号凭证与开发证书"
+                                                        success:YES];
 }
 
 - (NSString *)availableAppIdQuotaText {
@@ -192,6 +195,13 @@ static const char *kRFC5054_2048_N_Hex =
         NSDictionary *newSess = [NSDictionary dictionaryWithContentsOfFile:[self sessionFilePath]];
         if (newSess) [sess addEntriesFromDictionary:newSess];
         [[AuraSignEngine sharedEngine] appendTimelineLog:@"[TOKEN-REFRESH] 后台检测到 Xcode 令牌过期，已无感自动刷新成功！" success:YES];
+        [[AuraSignEngine sharedEngine] appendSimpleUserLogWithTitle:@"🔄 开发者令牌自动续期"
+                                                             detail:@"后台检测到苹果登录凭证过期，已自动为您无感刷新延长有效期"
+                                                            success:YES];
+    } else {
+        [[AuraSignEngine sharedEngine] appendSimpleUserLogWithTitle:@"⚠️ 开发者令牌续期失败"
+                                                             detail:@"后台自动刷新登录状态未通过，请前往「设置」页重新登录 Apple ID"
+                                                            success:NO];
     }
     return refreshed;
 }
@@ -706,7 +716,9 @@ static const char *kRFC5054_2048_N_Hex =
               completion:(void(^)(BOOL success, BOOL need2FA, NSString *errorMsg))completion {
 
     if (![self loadOpenSSLCryptoLibrary]) {
-        if (completion) completion(NO, NO, @"未找到 OpenSSL libcrypto.dylib，请确认 Sileo 中已安装 openssl");
+        NSString *msg = @"未找到 OpenSSL libcrypto.dylib，请确认 Sileo 中已安装 openssl";
+        [[AuraSignEngine sharedEngine] appendSimpleUserLogWithTitle:@"❌ Apple ID 登录失败" detail:msg success:NO];
+        if (completion) completion(NO, NO, msg);
         return;
     }
 
@@ -725,8 +737,10 @@ static const char *kRFC5054_2048_N_Hex =
             if (twoFactorCode.length == 6 && _pending2FAAdsid.length && _pending2FAIdmsToken.length) {
                 BOOL codeValid = [self validate2FACodeWithAltSignEndpoint:twoFactorCode adsid:_pending2FAAdsid idmsToken:_pending2FAIdmsToken anisette:anisette];
                 if (!codeValid) {
+                    NSString *msg = @"输入的 6 位双重认证码错误或已过期，请重新输入";
+                    [[AuraSignEngine sharedEngine] appendSimpleUserLogWithTitle:@"❌ 双重认证未通过" detail:msg success:NO];
                     dispatch_async(dispatch_get_main_queue(), ^{
-                        if (completion) completion(NO, YES, @"6 位双重认证码校验未通过，请重新输入");
+                        if (completion) completion(NO, YES, msg);
                     });
                     return;
                 }
@@ -788,10 +802,12 @@ static const char *kRFC5054_2048_N_Hex =
 
             if (!salt.length || !B_data.length || iterations <= 0) {
                 NSInteger ec = [initResp[@"Status"][@"ec"] integerValue];
-                NSString *em = initResp[@"Status"][@"em"] ?: @"GSA init 失败";
+                NSString *em = initResp[@"Status"][@"em"] ?: @"连接苹果认证服务器超时或网络异常";
+                NSString *msg = [NSString stringWithFormat:@"苹果 GSA 握手失败 (%ld): %@", (long)ec, em];
+                [[AuraSignEngine sharedEngine] appendSimpleUserLogWithTitle:@"❌ Apple ID 登录失败" detail:msg success:NO];
                 bn_free(bn_N); bn_free(bn_g); bn_free(bn_a); bn_free(bn_A); ctx_free(bnCtx);
                 dispatch_async(dispatch_get_main_queue(), ^{
-                    if (completion) completion(NO, NO, [NSString stringWithFormat:@"苹果 GSA 握手失败 (%ld): %@", (long)ec, em]);
+                    if (completion) completion(NO, NO, msg);
                 });
                 return;
             }
@@ -876,8 +892,10 @@ static const char *kRFC5054_2048_N_Hex =
             NSData *spdData = compResp[@"spd"];
 
             if (ec == -22406) {
+                NSString *msg = @"Apple ID 账号或密码不正确 (-22406)，请核对密码后重试";
+                [[AuraSignEngine sharedEngine] appendSimpleUserLogWithTitle:@"❌ Apple ID 密码错误" detail:msg success:NO];
                 dispatch_async(dispatch_get_main_queue(), ^{
-                    if (completion) completion(NO, NO, @"Apple ID 账号或密码不正确 (-22406)");
+                    if (completion) completion(NO, NO, msg);
                 });
                 return;
             }
@@ -905,6 +923,9 @@ static const char *kRFC5054_2048_N_Hex =
                 if (adsid.length && idmsToken.length) {
                     [self triggerTrustedDevice2FAPushWithADSID:adsid idmsToken:idmsToken anisette:anisette];
                 }
+                [[AuraSignEngine sharedEngine] appendSimpleUserLogWithTitle:@"🔐 已请求双重认证"
+                                                                     detail:[NSString stringWithFormat:@"已向账号 %@ 的受信任设备推送 6 位验证码", username]
+                                                                    success:YES];
                 dispatch_async(dispatch_get_main_queue(), ^{
                     if (completion) completion(NO, YES, @"验证码已推送至您的手机屏幕，请输入收到的 6 位数字验证码");
                 });
@@ -912,8 +933,10 @@ static const char *kRFC5054_2048_N_Hex =
             }
 
             if (!adsid.length || !idmsToken.length || ![skData isKindOfClass:[NSData class]]) {
+                NSString *msg = [NSString stringWithFormat:@"双重认证或会话协商未完成 (%ld: %@)", (long)ec, em.length ? em : @"账号状态异常"];
+                [[AuraSignEngine sharedEngine] appendSimpleUserLogWithTitle:@"❌ Apple ID 认证未完成" detail:msg success:NO];
                 dispatch_async(dispatch_get_main_queue(), ^{
-                    if (completion) completion(NO, (twoFactorCode.length == 0), [NSString stringWithFormat:@"双重认证未完成 (%ld: %@)", (long)ec, em]);
+                    if (completion) completion(NO, (twoFactorCode.length == 0), msg);
                 });
                 return;
             }
@@ -946,8 +969,10 @@ static const char *kRFC5054_2048_N_Hex =
                 xcodeToken = spdDict[@"t"][@"com.apple.gs.xcode.auth"][@"token"];
             }
             if (!xcodeToken.length) {
+                NSString *msg = @"兑换 Xcode 开发者令牌失败，请检查网络或稍后重试";
+                [[AuraSignEngine sharedEngine] appendSimpleUserLogWithTitle:@"❌ 兑换开发者令牌失败" detail:msg success:NO];
                 dispatch_async(dispatch_get_main_queue(), ^{
-                    if (completion) completion(NO, NO, @"兑换 Xcode 令牌失败，请稍后重试");
+                    if (completion) completion(NO, NO, msg);
                 });
                 return;
             }
@@ -973,8 +998,10 @@ static const char *kRFC5054_2048_N_Hex =
         NSDictionary *teamsResp = [self sendQH65B2Request:@"listTeams.action" bodyDict:@{} session:sess outError:&stepErr];
         NSArray *teams = teamsResp[@"teams"];
         if (![teams isKindOfClass:[NSArray class]] || teams.count == 0) {
+            NSString *msg = stepErr.localizedDescription ?: @"获取个人开发者 TeamID 失败";
+            [[AuraSignEngine sharedEngine] appendSimpleUserLogWithTitle:@"❌ 获取开发者团队失败" detail:msg success:NO];
             dispatch_async(dispatch_get_main_queue(), ^{
-                if (completion) completion(NO, NO, stepErr.localizedDescription ?: @"获取个人开发者 TeamID 失败");
+                if (completion) completion(NO, NO, msg);
             });
             return;
         }
@@ -994,8 +1021,10 @@ static const char *kRFC5054_2048_N_Hex =
         NSError *certErr = nil;
         BOOL certReady = [self ensureValidSigningCertificateWithSession:sess error:&certErr];
         if (!certReady) {
+            NSString *msg = certErr.localizedDescription ?: @"同步苹果 1 年期开发证书失败";
+            [[AuraSignEngine sharedEngine] appendSimpleUserLogWithTitle:@"❌ 签发开发证书失败" detail:msg success:NO];
             dispatch_async(dispatch_get_main_queue(), ^{
-                if (completion) completion(NO, NO, certErr.localizedDescription ?: @"同步苹果开发证书失败");
+                if (completion) completion(NO, NO, msg);
             });
             return;
         }

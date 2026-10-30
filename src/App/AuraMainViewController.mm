@@ -1,4 +1,4 @@
-// src/App/AuraMainViewController.mm (三栏终极版 -> 0:🛡️签名 | 1:📜日志 | 2:⚙️设置)
+// src/App/AuraMainViewController.mm (账号移至⚙️设置页顶部 + 全流程错误白话文日志终极版)
 #import <UIKit/UIKit.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <math.h>
@@ -271,9 +271,9 @@
 #pragma mark - UITableView 数据源
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
-    if (_currentTab == 0) return 4;
-    if (_currentTab == 1) return 1;
-    return 2;
+    if (_currentTab == 0) return 3; // 0:护盾卡片 | 1:需要签名的软件 | 2:快捷操作
+    if (_currentTab == 1) return 1; // 0:白话文日志列表
+    return 3;                       // 0:Apple ID账号凭证 | 1:自动续签策略 | 2:安全防线与系统通知
 }
 
 - (CGFloat)tableView:(UITableView *)tableView heightForHeaderInSection:(NSInteger)section {
@@ -289,13 +289,14 @@
     lbl.textColor = [UIColor colorWithRed:0.45 green:0.92 blue:0.75 alpha:0.95];
 
     if (_currentTab == 0) {
-        if (section == 1) lbl.text = @"👤 APPLE ID 免费签名凭证";
-        else if (section == 2) lbl.text = @"👑 需要签名的软件 (最多勾选 3 个自动守护槽位)";
-        else if (section == 3) lbl.text = @"📦 快捷导入与全量续签";
+        if (section == 1) lbl.text = @"👑 需要签名的软件 (最多勾选 3 个自动守护槽位)";
+        else if (section == 2) lbl.text = @"📦 快捷导入与全量续签";
     } else if (_currentTab == 1) {
-        lbl.text = @"📜 签名与自动保活记录 (清晰白话文时间轴)";
+        lbl.text = @"📜 签名与登录状态记录 (包含全部成功与失败原因)";
     } else {
-        lbl.text = (section == 0) ? @"⚡ 自动续签策略设置" : @"🛑 安全防线与系统通知";
+        if (section == 0) lbl.text = @"👤 APPLE ID 免费签名凭证";
+        else if (section == 1) lbl.text = @"⚡ 自动续签策略设置";
+        else lbl.text = @"🛑 安全防线与系统通知";
     }
     [header addSubview:lbl];
     return header;
@@ -304,25 +305,28 @@
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     if (_currentTab == 0) {
         if (section == 0) return 1;
-        if (section == 1) return 1;
-        if (section == 2) return MAX(1, _installedApps.count);
+        if (section == 1) return MAX(1, _installedApps.count);
         return 2;
     } else if (_currentTab == 1) {
         return MAX(1, _simpleLogs.count);
+    } else {
+        if (section == 0) return 1;
+        if (section == 1) return 4;
+        return 3;
     }
-    return (section == 0) ? 4 : 3;
 }
 
 - (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
     if (_currentTab == 0) {
         if (indexPath.section == 0) return 120;
-        if (indexPath.section == 1) return 90;
-        if (indexPath.section == 2) return 118;
+        if (indexPath.section == 1) return 118;
         return 78;
     } else if (_currentTab == 1) {
-        return 84;
+        return 86;
+    } else {
+        if (indexPath.section == 0) return 90;
+        return 80;
     }
-    return 80;
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
@@ -359,35 +363,6 @@
             [card addSubview:sub];
         }
         else if (indexPath.section == 1) {
-            AuraAppleDeveloperAPI *api = [AuraAppleDeveloperAPI sharedAPI];
-            BOOL loggedIn = [api hasValidAccountInKeychain];
-
-            UILabel *t = [[UILabel alloc] initWithFrame:CGRectMake(18, 12, cardW - 122, 22)];
-            t.font = [UIFont systemFontOfSize:15.5 weight:UIFontWeightBold];
-            t.textColor = [UIColor whiteColor];
-            t.text = loggedIn ? [api currentAppleIDEmail] : @"尚未绑定 Apple ID";
-            [card addSubview:t];
-
-            UILabel *s = [[UILabel alloc] initWithFrame:CGRectMake(18, 36, cardW - 122, 34)];
-            s.font = [UIFont systemFontOfSize:11.5];
-            s.numberOfLines = 2;
-            s.textColor = loggedIn ? [UIColor colorWithRed:0.4 green:0.95 blue:0.65 alpha:1.0] : [UIColor colorWithRed:1.0 green:0.75 blue:0.35 alpha:1.0];
-            s.text = loggedIn
-                ? [NSString stringWithFormat:@"✓ TeamID: %@\n%@", [api currentTeamID], [api availableAppIdQuotaText]]
-                : @"⚠️ 请点击右侧【立即登录】调起苹果认证获取 7 天真证书";
-            [card addSubview:s];
-
-            UIButton *loginBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-            loginBtn.frame = CGRectMake(cardW - 100, 22, 84, 36);
-            loginBtn.backgroundColor = [UIColor colorWithRed:0.16 green:0.56 blue:0.98 alpha:0.95];
-            loginBtn.layer.cornerRadius = 18;
-            [loginBtn setTitle:(loggedIn ? @"切换账号" : @"立即登录") forState:UIControlStateNormal];
-            [loginBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-            loginBtn.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightBold];
-            [loginBtn addTarget:self action:@selector(onAppleIDLoginButtonTapped) forControlEvents:UIControlEventTouchUpInside];
-            [card addSubview:loginBtn];
-        }
-        else if (indexPath.section == 2) {
             if (_installedApps.count == 0) {
                 UILabel *empty = [[UILabel alloc] initWithFrame:card.bounds];
                 empty.textAlignment = NSTextAlignmentCenter;
@@ -498,13 +473,13 @@
         }
     }
     else if (_currentTab == 1) {
-        // ==================== 第 2 页：📜 日志 (简单易懂白话文卡片) ====================
+        // ==================== 第 2 页：📜 日志 (包含全部成功与失败原因) ====================
         if (_simpleLogs.count == 0) {
             UILabel *empty = [[UILabel alloc] initWithFrame:card.bounds];
             empty.textAlignment = NSTextAlignmentCenter;
             empty.font = [UIFont systemFontOfSize:13.5 weight:UIFontWeightMedium];
             empty.textColor = [UIColor colorWithWhite:1.0 alpha:0.65];
-            empty.text = @"暂无签名记录 · 当您签名或后台自动续签后会在此显示";
+            empty.text = @"暂无记录 · 您的登录、签名与自动续签结果都会在此显示";
             [card addSubview:empty];
         } else {
             NSDictionary *entry = _simpleLogs[indexPath.row];
@@ -512,8 +487,8 @@
 
             UILabel *titleLbl = [[UILabel alloc] initWithFrame:CGRectMake(16, 12, cardW - 110, 20)];
             titleLbl.font = [UIFont systemFontOfSize:14.5 weight:UIFontWeightBold];
-            titleLbl.textColor = ok ? [UIColor colorWithRed:0.45 green:0.95 blue:0.70 alpha:1.0] : [UIColor colorWithRed:1.0 green:0.50 blue:0.45 alpha:1.0];
-            titleLbl.text = entry[@"title"] ?: @"签名事件";
+            titleLbl.textColor = ok ? [UIColor colorWithRed:0.45 green:0.95 blue:0.70 alpha:1.0] : [UIColor colorWithRed:1.0 green:0.48 blue:0.42 alpha:1.0];
+            titleLbl.text = entry[@"title"] ?: @"事件记录";
             [card addSubview:titleLbl];
 
             UILabel *timeLbl = [[UILabel alloc] initWithFrame:CGRectMake(cardW - 96, 12, 80, 18)];
@@ -523,7 +498,7 @@
             timeLbl.text = entry[@"time"] ?: @"";
             [card addSubview:timeLbl];
 
-            UILabel *detailLbl = [[UILabel alloc] initWithFrame:CGRectMake(16, 34, cardW - 32, 34)];
+            UILabel *detailLbl = [[UILabel alloc] initWithFrame:CGRectMake(16, 34, cardW - 32, 36)];
             detailLbl.font = [UIFont systemFontOfSize:12.5 weight:UIFontWeightRegular];
             detailLbl.textColor = [UIColor colorWithWhite:1.0 alpha:0.90];
             detailLbl.numberOfLines = 2;
@@ -532,82 +507,112 @@
         }
     }
     else {
-        // ==================== 第 3 页：⚙️ 设置 ====================
-        UILabel *lbl = [[UILabel alloc] initWithFrame:CGRectMake(16, 12, cardW - 100, 46)];
-        lbl.font = [UIFont systemFontOfSize:13.5 weight:UIFontWeightSemibold];
-        lbl.textColor = [UIColor whiteColor];
-        lbl.numberOfLines = 2;
-        [card addSubview:lbl];
-
+        // ==================== 第 3 页：⚙️ 设置 (Section 0 为 Apple ID 账号卡片) ====================
         if (indexPath.section == 0) {
-            if (indexPath.row == 0) {
-                lbl.text = [NSString stringWithFormat:@"⚡ 后台静默自动续签\n证书剩余少于 %ld 天时联网自动续回 7 天", (long)engine.normalRenewThresholdDays];
-                UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectMake(cardW - 68, 20, 51, 31)];
-                sw.on = engine.autoRenewEnabled;
-                sw.onTintColor = [UIColor colorWithRed:0.15 green:0.75 blue:0.50 alpha:1.0];
-                sw.tag = 200;
-                [sw addTarget:self action:@selector(onSwitchToggled:) forControlEvents:UIControlEventValueChanged];
-                [card addSubview:sw];
-            } else if (indexPath.row == 1) {
-                lbl.text = [NSString stringWithFormat:@"📅 常规静默续签触发天数设置\n当已守护应用剩余少于【%ld 天】时自动续签", (long)engine.normalRenewThresholdDays];
-                UIButton *cfgBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-                cfgBtn.frame = CGRectMake(cardW - 88, 19, 74, 32);
-                cfgBtn.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.20];
-                cfgBtn.layer.cornerRadius = 16;
-                [cfgBtn setTitle:[NSString stringWithFormat:@"<%ld天 ▾", (long)engine.normalRenewThresholdDays] forState:UIControlStateNormal];
-                [cfgBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-                cfgBtn.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightBold];
-                [cfgBtn addTarget:self action:@selector(onConfigureNormalRenewRuleTapped) forControlEvents:UIControlEventTouchUpInside];
-                [card addSubview:cfgBtn];
-            } else if (indexPath.row == 2) {
-                lbl.text = @"🔋 低电量 (<5%) 紧急抢救续签开关\n防止手机没电自动关机后证书过期失联";
-                UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectMake(cardW - 68, 20, 51, 31)];
-                sw.on = engine.lowBatteryRescueEnabled;
-                sw.onTintColor = [UIColor colorWithRed:0.15 green:0.75 blue:0.50 alpha:1.0];
-                sw.tag = 201;
-                [sw addTarget:self action:@selector(onSwitchToggled:) forControlEvents:UIControlEventValueChanged];
-                [card addSubview:sw];
-            } else {
-                lbl.text = [NSString stringWithFormat:@"⏱️ 低电量抢救触发天数设置\n当电量 <%ld%% 且证书少于【%ld 天】时紧急续签",
-                            (long)engine.lowBatteryTriggerPercent, (long)engine.lowBatteryThresholdDays];
-                UIButton *cfgBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-                cfgBtn.frame = CGRectMake(cardW - 88, 19, 74, 32);
-                cfgBtn.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.20];
-                cfgBtn.layer.cornerRadius = 16;
-                [cfgBtn setTitle:[NSString stringWithFormat:@"<%ld天 ▾", (long)engine.lowBatteryThresholdDays] forState:UIControlStateNormal];
-                [cfgBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-                cfgBtn.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightBold];
-                [cfgBtn addTarget:self action:@selector(onConfigureLowBatteryRuleTapped) forControlEvents:UIControlEventTouchUpInside];
-                [card addSubview:cfgBtn];
-            }
+            AuraAppleDeveloperAPI *api = [AuraAppleDeveloperAPI sharedAPI];
+            BOOL loggedIn = [api hasValidAccountInKeychain];
+
+            UILabel *t = [[UILabel alloc] initWithFrame:CGRectMake(18, 12, cardW - 122, 22)];
+            t.font = [UIFont systemFontOfSize:15.5 weight:UIFontWeightBold];
+            t.textColor = [UIColor whiteColor];
+            t.text = loggedIn ? [api currentAppleIDEmail] : @"尚未绑定 Apple ID";
+            [card addSubview:t];
+
+            UILabel *s = [[UILabel alloc] initWithFrame:CGRectMake(18, 36, cardW - 122, 34)];
+            s.font = [UIFont systemFontOfSize:11.5];
+            s.numberOfLines = 2;
+            s.textColor = loggedIn ? [UIColor colorWithRed:0.4 green:0.95 blue:0.65 alpha:1.0] : [UIColor colorWithRed:1.0 green:0.75 blue:0.35 alpha:1.0];
+            s.text = loggedIn
+                ? [NSString stringWithFormat:@"✓ TeamID: %@\n%@", [api currentTeamID], [api availableAppIdQuotaText]]
+                : @"⚠️ 请点击右侧【立即登录】调起苹果认证获取 7 天真证书";
+            [card addSubview:s];
+
+            UIButton *loginBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+            loginBtn.frame = CGRectMake(cardW - 100, 22, 84, 36);
+            loginBtn.backgroundColor = [UIColor colorWithRed:0.16 green:0.56 blue:0.98 alpha:0.95];
+            loginBtn.layer.cornerRadius = 18;
+            [loginBtn setTitle:(loggedIn ? @"切换账号" : @"立即登录") forState:UIControlStateNormal];
+            [loginBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+            loginBtn.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightBold];
+            [loginBtn addTarget:self action:@selector(onAppleIDLoginButtonTapped) forControlEvents:UIControlEventTouchUpInside];
+            [card addSubview:loginBtn];
         } else {
-            if (indexPath.row == 0) {
-                lbl.text = @"🛑 关机/重启掉签系统级强拦截\n证书过期时尝试关机重启将弹窗拦截并提供续签";
-                UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectMake(cardW - 68, 20, 51, 31)];
-                sw.on = engine.rebootShieldEnabled;
-                sw.onTintColor = [UIColor colorWithRed:0.15 green:0.75 blue:0.50 alpha:1.0];
-                sw.tag = 202;
-                [sw addTarget:self action:@selector(onSwitchToggled:) forControlEvents:UIControlEventValueChanged];
-                [card addSubview:sw];
-            } else if (indexPath.row == 1) {
-                lbl.text = @"🔔 签名完成系统横幅通知\n以「灵签 Pro」名义在屏幕顶部弹出通知与提示音";
-                UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectMake(cardW - 68, 20, 51, 31)];
-                sw.on = engine.notificationEnabled;
-                sw.onTintColor = [UIColor colorWithRed:0.15 green:0.75 blue:0.50 alpha:1.0];
-                sw.tag = 203;
-                [sw addTarget:self action:@selector(onSwitchToggled:) forControlEvents:UIControlEventValueChanged];
-                [card addSubview:sw];
+            UILabel *lbl = [[UILabel alloc] initWithFrame:CGRectMake(16, 12, cardW - 100, 46)];
+            lbl.font = [UIFont systemFontOfSize:13.5 weight:UIFontWeightSemibold];
+            lbl.textColor = [UIColor whiteColor];
+            lbl.numberOfLines = 2;
+            [card addSubview:lbl];
+
+            if (indexPath.section == 1) {
+                if (indexPath.row == 0) {
+                    lbl.text = [NSString stringWithFormat:@"⚡ 后台静默自动续签\n证书剩余少于 %ld 天时联网自动续回 7 天", (long)engine.normalRenewThresholdDays];
+                    UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectMake(cardW - 68, 20, 51, 31)];
+                    sw.on = engine.autoRenewEnabled;
+                    sw.onTintColor = [UIColor colorWithRed:0.15 green:0.75 blue:0.50 alpha:1.0];
+                    sw.tag = 200;
+                    [sw addTarget:self action:@selector(onSwitchToggled:) forControlEvents:UIControlEventValueChanged];
+                    [card addSubview:sw];
+                } else if (indexPath.row == 1) {
+                    lbl.text = [NSString stringWithFormat:@"📅 常规静默续签触发天数设置\n当已守护应用剩余少于【%ld 天】时自动续签", (long)engine.normalRenewThresholdDays];
+                    UIButton *cfgBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+                    cfgBtn.frame = CGRectMake(cardW - 88, 19, 74, 32);
+                    cfgBtn.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.20];
+                    cfgBtn.layer.cornerRadius = 16;
+                    [cfgBtn setTitle:[NSString stringWithFormat:@"<%ld天 ▾", (long)engine.normalRenewThresholdDays] forState:UIControlStateNormal];
+                    [cfgBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+                    cfgBtn.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightBold];
+                    [cfgBtn addTarget:self action:@selector(onConfigureNormalRenewRuleTapped) forControlEvents:UIControlEventTouchUpInside];
+                    [card addSubview:cfgBtn];
+                } else if (indexPath.row == 2) {
+                    lbl.text = @"🔋 低电量 (<5%) 紧急抢救续签开关\n防止手机没电自动关机后证书过期失联";
+                    UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectMake(cardW - 68, 20, 51, 31)];
+                    sw.on = engine.lowBatteryRescueEnabled;
+                    sw.onTintColor = [UIColor colorWithRed:0.15 green:0.75 blue:0.50 alpha:1.0];
+                    sw.tag = 201;
+                    [sw addTarget:self action:@selector(onSwitchToggled:) forControlEvents:UIControlEventValueChanged];
+                    [card addSubview:sw];
+                } else {
+                    lbl.text = [NSString stringWithFormat:@"⏱️ 低电量抢救触发天数设置\n当电量 <%ld%% 且证书少于【%ld 天】时紧急续签",
+                                (long)engine.lowBatteryTriggerPercent, (long)engine.lowBatteryThresholdDays];
+                    UIButton *cfgBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+                    cfgBtn.frame = CGRectMake(cardW - 88, 19, 74, 32);
+                    cfgBtn.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.20];
+                    cfgBtn.layer.cornerRadius = 16;
+                    [cfgBtn setTitle:[NSString stringWithFormat:@"<%ld天 ▾", (long)engine.lowBatteryThresholdDays] forState:UIControlStateNormal];
+                    [cfgBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+                    cfgBtn.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightBold];
+                    [cfgBtn addTarget:self action:@selector(onConfigureLowBatteryRuleTapped) forControlEvents:UIControlEventTouchUpInside];
+                    [card addSubview:cfgBtn];
+                }
             } else {
-                lbl.text = @"📨 发送测试系统横幅通知\n点击立即测试「灵签 Pro」顶部横幅弹窗与提示音";
-                UIButton *testBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-                testBtn.frame = CGRectMake(cardW - 88, 19, 74, 32);
-                testBtn.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.20];
-                testBtn.layer.cornerRadius = 16;
-                [testBtn setTitle:@"点击测试" forState:UIControlStateNormal];
-                [testBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-                testBtn.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightBold];
-                testBtn.userInteractionEnabled = NO;
-                [card addSubview:testBtn];
+                if (indexPath.row == 0) {
+                    lbl.text = @"🛑 关机/重启掉签系统级强拦截\n证书过期时尝试关机重启将弹窗拦截并提供续签";
+                    UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectMake(cardW - 68, 20, 51, 31)];
+                    sw.on = engine.rebootShieldEnabled;
+                    sw.onTintColor = [UIColor colorWithRed:0.15 green:0.75 blue:0.50 alpha:1.0];
+                    sw.tag = 202;
+                    [sw addTarget:self action:@selector(onSwitchToggled:) forControlEvents:UIControlEventValueChanged];
+                    [card addSubview:sw];
+                } else if (indexPath.row == 1) {
+                    lbl.text = @"🔔 签名完成系统横幅通知\n以「灵签 Pro」名义在屏幕顶部弹出通知与提示音";
+                    UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectMake(cardW - 68, 20, 51, 31)];
+                    sw.on = engine.notificationEnabled;
+                    sw.onTintColor = [UIColor colorWithRed:0.15 green:0.75 blue:0.50 alpha:1.0];
+                    sw.tag = 203;
+                    [sw addTarget:self action:@selector(onSwitchToggled:) forControlEvents:UIControlEventValueChanged];
+                    [card addSubview:sw];
+                } else {
+                    lbl.text = @"📨 发送测试系统横幅通知\n点击立即测试「灵签 Pro」顶部横幅弹窗与提示音";
+                    UIButton *testBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+                    testBtn.frame = CGRectMake(cardW - 88, 19, 74, 32);
+                    testBtn.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.20];
+                    testBtn.layer.cornerRadius = 16;
+                    [testBtn setTitle:@"点击测试" forState:UIControlStateNormal];
+                    [testBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+                    testBtn.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightBold];
+                    testBtn.userInteractionEnabled = NO;
+                    [card addSubview:testBtn];
+                }
             }
         }
     }
@@ -639,13 +644,19 @@
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     if (_currentTab == 0) {
-        if (indexPath.section == 1) {
-            [self onAppleIDLoginButtonTapped];
-        } else if (indexPath.section == 3 && indexPath.row == 0) {
+        if (indexPath.section == 2 && indexPath.row == 0) {
+            if (![[AuraAppleDeveloperAPI sharedAPI] hasValidAccountInKeychain]) {
+                [self onAppleIDLoginButtonTapped];
+                return;
+            }
             UIDocumentPickerViewController *picker = [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:@[UTTypeData]];
             picker.delegate = self;
             [self presentViewController:picker animated:YES completion:nil];
-        } else if (indexPath.section == 3 && indexPath.row == 1) {
+        } else if (indexPath.section == 2 && indexPath.row == 1) {
+            if (![[AuraAppleDeveloperAPI sharedAPI] hasValidAccountInKeychain]) {
+                [self onAppleIDLoginButtonTapped];
+                return;
+            }
             [self showLoadingHUD:@"正在连接苹果服务器刷新已守护应用..."];
             [[AuraSignEngine sharedEngine] performEmergencyResignAllWithCompletion:^(BOOL success, NSString *message) {
                 [self hideLoadingHUD];
@@ -654,11 +665,13 @@
             }];
         }
     } else if (_currentTab == 2) {
-        if (indexPath.section == 0 && indexPath.row == 1) {
+        if (indexPath.section == 0) {
+            [self onAppleIDLoginButtonTapped];
+        } else if (indexPath.section == 1 && indexPath.row == 1) {
             [self onConfigureNormalRenewRuleTapped];
-        } else if (indexPath.section == 0 && indexPath.row == 3) {
+        } else if (indexPath.section == 1 && indexPath.row == 3) {
             [self onConfigureLowBatteryRuleTapped];
-        } else if (indexPath.section == 1 && indexPath.row == 2) {
+        } else if (indexPath.section == 2 && indexPath.row == 2) {
             [AuraSignEngine sharedEngine].notificationEnabled = YES;
             [[AuraSignEngine sharedEngine] savePreferences];
             [[AuraSignEngine sharedEngine] sendSystemNotificationWithTitle:@"✅ 证书续签成功 (测试通知)"
@@ -732,14 +745,15 @@
             [self reloadAllDataAsync];
             if (success) {
                 [[AuraSignEngine sharedEngine] appendSimpleUserLogWithTitle:@"👤 Apple ID 绑定成功"
-                                                                     detail:[NSString stringWithFormat:@"已成功登录 %@ 并激活 1 年期个人开发证书", email]
+                                                                     detail:[NSString stringWithFormat:@"已成功登录 %@ 并激活 1 年期个人开发证书 (TeamID: %@)", email, [[AuraAppleDeveloperAPI sharedAPI] currentTeamID]]
                                                                     success:YES];
+                [self reloadAllDataAsync];
                 [self showResultAlertWithTitle:@"🎉 绑定成功"
-                                       message:[NSString stringWithFormat:@"已成功获取苹果 TeamID (%@) 并签发 1 年期真证书！现在您可以直接点击应用右侧的【立即修复/续签】。", [[AuraAppleDeveloperAPI sharedAPI] currentTeamID]]];
+                                       message:[NSString stringWithFormat:@"已成功获取苹果 TeamID (%@) 并签发 1 年期真证书！现在您可以前往「签名」页点击【立即修复/续签】。", [[AuraAppleDeveloperAPI sharedAPI] currentTeamID]]];
             } else if (need2FA) {
                 [self showStep2TwoFactorPromptWithEmail:email password:pass];
             } else {
-                [self showResultAlertWithTitle:@"❌ 登录未通过" message:(errorMsg ?: @"请查看诊断日志")];
+                [self showResultAlertWithTitle:@"❌ 登录未通过" message:(errorMsg ?: @"请前往「日志」页查看具体原因")];
             }
         }];
     }]];
@@ -779,10 +793,11 @@
                 [[AuraSignEngine sharedEngine] appendSimpleUserLogWithTitle:@"👤 Apple ID 绑定成功"
                                                                      detail:[NSString stringWithFormat:@"已通过双重认证登录 %@ 并激活 1 年期个人开发证书", email]
                                                                     success:YES];
+                [self reloadAllDataAsync];
                 [self showResultAlertWithTitle:@"🎉 绑定成功"
-                                       message:[NSString stringWithFormat:@"已成功获取苹果 TeamID (%@) 并签发 1 年期真证书！现在您可以直接点击应用右侧的【立即修复/续签】。", [[AuraAppleDeveloperAPI sharedAPI] currentTeamID]]];
+                                       message:[NSString stringWithFormat:@"已成功获取苹果 TeamID (%@) 并签发 1 年期真证书！现在您可以前往「签名」页点击【立即修复/续签】。", [[AuraAppleDeveloperAPI sharedAPI] currentTeamID]]];
             } else {
-                [self showResultAlertWithTitle:@"❌ 验证未通过" message:(errorMsg ?: @"请点击复制诊断日志查看详情")];
+                [self showResultAlertWithTitle:@"❌ 验证未通过" message:(errorMsg ?: @"请前往「日志」页查看具体原因")];
             }
         }];
     }]];
@@ -790,8 +805,13 @@
     [self presentViewController:alert animated:YES completion:nil];
 }
 
-// 单独点击某个软件的「立即修复 / 立即续签」：严格只签所点击的这 1 个软件！
+// 单独点击某个软件的「立即修复 / 立即续签」：未登录时自动引导登录，已登录时严格只签所点击的这 1 个软件
 - (void)onFastResignTapped:(UIButton *)sender {
+    if (![[AuraAppleDeveloperAPI sharedAPI] hasValidAccountInKeychain]) {
+        [self onAppleIDLoginButtonTapped];
+        return;
+    }
+
     AuraAppInfo *app = _installedApps[sender.tag];
     [self showLoadingHUD:[NSString stringWithFormat:@"正在向苹果申请 7 天描述文件并重签\n【%@】...", app.appName]];
 
@@ -807,7 +827,7 @@
                 [self showResultAlertWithTitle:@"✅ 续签成功"
                                        message:[NSString stringWithFormat:@"【%@】已成功签入苹果官方 7 天真证书并通过 libmis 未越狱开机校验！", app.appName]];
             } else {
-                [self showResultAlertWithTitle:@"❌ 签名未完成" message:(err.localizedDescription ?: @"未知错误")];
+                [self showResultAlertWithTitle:@"❌ 签名未完成" message:(err.localizedDescription ?: @"请切到「📜 日志」页查看具体失败原因")];
             }
         });
     });
@@ -832,7 +852,7 @@
             if (ok) {
                 [self showResultAlertWithTitle:@"✅ 安装完成" message:@"IPA 已成功签入 7 天苹果真证书并安装至桌面！"];
             } else {
-                [self showResultAlertWithTitle:@"❌ 签名安装未通过" message:(err.localizedDescription ?: @"请先确认已登录绑定 Apple ID")];
+                [self showResultAlertWithTitle:@"❌ 签名安装未通过" message:(err.localizedDescription ?: @"请切到「📜 日志」页查看具体原因")];
             }
         });
     });
