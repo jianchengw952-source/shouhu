@@ -4,6 +4,7 @@
 #import "AuraAppleDeveloperAPI.h"
 #import <dlfcn.h>
 #import <objc/runtime.h>
+#import <objc/message.h>
 #import <sys/stat.h>
 #import <spawn.h>
 #import <sys/wait.h>
@@ -208,7 +209,7 @@ typedef struct {
     Class centerCls = NSClassFromString(@"UNUserNotificationCenter");
     if (!centerCls) return;
     id center = [centerCls currentNotificationCenter];
-    [center setDelegate:self];
+    ((void (*)(id, SEL, id))objc_msgSend)(center, sel_registerName("setDelegate:"), (id)self);
     // UNAuthorizationOptionBadge(1<<0) | UNAuthorizationOptionSound(1<<1) | UNAuthorizationOptionAlert(1<<2) = 7
     [center requestAuthorizationWithOptions:7 completionHandler:^(BOOL granted, NSError *error) {}];
 }
@@ -235,7 +236,7 @@ typedef struct {
     NSString *myBid = [[NSBundle mainBundle] bundleIdentifier];
     if ([myBid isEqualToString:@"com.aurasign.pro"]) {
         center = [centerCls currentNotificationCenter];
-        [center setDelegate:self];
+        ((void (*)(id, SEL, id))objc_msgSend)(center, sel_registerName("setDelegate:"), (id)self);
     } else if ([centerCls instancesRespondToSelector:@selector(initWithBundleIdentifier:)]) {
         // 后台守护进程 aurasignd 或 SpringBoard 代发给 com.aurasign.pro
         center = [[centerCls alloc] initWithBundleIdentifier:@"com.aurasign.pro"];
