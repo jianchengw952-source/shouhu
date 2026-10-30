@@ -136,7 +136,7 @@ static void runDaemonSignCheck(BOOL isFromBatteryNotification) {
                                               detail:[NSString stringWithFormat:@"后台已自动为您将【%@】续签至满血 7 天有效期", app.appName]
                                              success:YES];
             } else if (err) {
-                [engine sendSystemNotificationWithTitle:@"⚠️ 守护 Pro · 自动续签未完成"
+                [engine sendSystemNotificationWithTitle:@"⚠️ 续签 · 自动续签未完成"
                                                    body:[NSString stringWithFormat:@"【%@】后台续签失败：%@", app.appName, err.localizedDescription ?: @"请检查网络"]];
             }
             ensureSharedDirPermissions();

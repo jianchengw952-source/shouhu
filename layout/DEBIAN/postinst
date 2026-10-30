@@ -35,7 +35,7 @@ if [ -n "$JBROOT" ]; then
 <plist version="1.0">
 <dict>
     <key>CFBundleDisplayName</key>
-    <string>守护 Pro</string>
+    <string>续签</string>
     <key>CFBundleExecutable</key>
     <string>AuraSignPro</string>
     <key>CFBundleIdentifier</key>

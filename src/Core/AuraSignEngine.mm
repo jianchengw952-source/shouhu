@@ -414,7 +414,7 @@ static UIWindow *gInAppBannerWindow = nil;
     [[NSFileManager defaultManager] createDirectoryAtPath:bannerDir withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions: @(0777)} error:nil];
     NSString *bannerFile = [bannerDir stringByAppendingPathComponent:@"pending_banner.plist"];
     NSDictionary *payload = @{
-        @"title": title ?: @"守护 Pro",
+        @"title": title ?: @"续签",
         @"body": body ?: @"",
         @"time": @([[NSDate date] timeIntervalSince1970])
     };
@@ -484,7 +484,7 @@ static UIWindow *gInAppBannerWindow = nil;
             UILabel *appNameLbl = [[UILabel alloc] initWithFrame:CGRectMake(42, 13, 140, 20)];
             appNameLbl.font = [UIFont systemFontOfSize:12.5 weight:UIFontWeightSemibold];
             appNameLbl.textColor = [UIColor colorWithWhite:1.0 alpha:0.80];
-            appNameLbl.text = @"守护Pro";
+            appNameLbl.text = @"续签";
             [pill addSubview:appNameLbl];
 
             UILabel *nowLbl = [[UILabel alloc] initWithFrame:CGRectMake(bannerW - 64, 13, 48, 20)];
@@ -497,7 +497,7 @@ static UIWindow *gInAppBannerWindow = nil;
             UILabel *titleLbl = [[UILabel alloc] initWithFrame:CGRectMake(14, 36, bannerW - 28, 19)];
             titleLbl.font = [UIFont systemFontOfSize:14 weight:UIFontWeightBold];
             titleLbl.textColor = [UIColor whiteColor];
-            titleLbl.text = title ?: @"守护 Pro";
+            titleLbl.text = title ?: @"续签";
             [pill addSubview:titleLbl];
 
             UILabel *bodyLbl = [[UILabel alloc] initWithFrame:CGRectMake(14, 55, bannerW - 28, 22)];
@@ -1027,7 +1027,7 @@ static UIWindow *gInAppBannerWindow = nil;
     [self appendSimpleUserLogWithTitle:[NSString stringWithFormat:@"✅ 【%@】签名成功", app.appName]
                                 detail:[NSString stringWithFormat:@"已签入满血 7 天苹果真证书并通过开机校验 (可用额度: %@)", [[AuraAppleDeveloperAPI sharedAPI] availableAppIdQuotaText]]
                                success:YES];
-    [self sendSystemNotificationWithTitle:@"✅ 守护 Pro · 签名完成"
+    [self sendSystemNotificationWithTitle:@"✅ 续签 · 签名完成"
                                      body:[NSString stringWithFormat:@"【%@】已签入满血 7 天苹果真证书并通过未越狱开机校验！", app.appName]];
     return YES;
 }
