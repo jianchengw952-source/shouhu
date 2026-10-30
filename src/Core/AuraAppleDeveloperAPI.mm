@@ -64,6 +64,183 @@ static const char *kRFC5054_2048_N_Hex =
     "AF874E7303CE53299CCC041C7BC308D82A5698F3A8D0C38271AE35F8E9DBFBB6"
     "94B5C803D89F7AE435DE236D525F54759B65E372FCD68EF20FA7111F9E4AFF73";
 
+typedef CCCryptorStatus (*AuraCCCryptorGCMOneshotDecrypt_fn)(
+    CCAlgorithm alg, const void *key, size_t keyLength,
+    const void *iv, size_t ivLen,
+    const void *aData, size_t aDataLen,
+    const void *dataIn, size_t dataInLength,
+    void *dataOut, const void *tagIn, size_t tagLength);
+
+// 内置纯 C 4096-bit 容量大整数引擎 (用于 Relaxin arm64e 免 libcrypto.dylib 完成 SRP6a 握手)
+typedef struct {
+    uint32_t w[136]; // 小端序: w[0] 为最低 32 位
+} AuraBN;
+
+static void aura_bn_zero(AuraBN *a) {
+    memset(a, 0, sizeof(AuraBN));
+}
+
+static void aura_bn_from_bytes(AuraBN *r, const unsigned char *be, int len) {
+    aura_bn_zero(r);
+    for (int i = 0; i < len; i++) {
+        int bytePos = len - 1 - i;
+        int wordIdx = i >> 2;
+        int shift = (i & 3) * 8;
+        if (wordIdx < 136) {
+            r->w[wordIdx] |= ((uint32_t)be[bytePos]) << shift;
+        }
+    }
+}
+
+static NSData *aura_bn_to_padded_data(const AuraBN *a, int padLen) {
+    int highestByte = 0;
+    for (int i = 135; i >= 0; i--) {
+        if (a->w[i] != 0) {
+            for (int b = 3; b >= 0; b--) {
+                if ((a->w[i] >> (b * 8)) & 0xFF) {
+                    highestByte = i * 4 + b + 1;
+                    break;
+                }
+            }
+            break;
+        }
+    }
+    int totalLen = MAX(highestByte, padLen);
+    NSMutableData *out = [NSMutableData dataWithLength:totalLen];
+    unsigned char *ptr = (unsigned char *)out.mutableBytes;
+    for (int i = 0; i < highestByte; i++) {
+        ptr[totalLen - 1 - i] = (unsigned char)((a->w[i >> 2] >> ((i & 3) * 8)) & 0xFF);
+    }
+    return out;
+}
+
+static int aura_bn_cmp(const AuraBN *a, const AuraBN *b) {
+    for (int i = 135; i >= 0; i--) {
+        if (a->w[i] > b->w[i]) return 1;
+        if (a->w[i] < b->w[i]) return -1;
+    }
+    return 0;
+}
+
+static void aura_bn_add(AuraBN *r, const AuraBN *a, const AuraBN *b) {
+    AuraBN res;
+    aura_bn_zero(&res);
+    uint64_t carry = 0;
+    for (int i = 0; i < 136; i++) {
+        uint64_t sum = (uint64_t)a->w[i] + (uint64_t)b->w[i] + carry;
+        res.w[i] = (uint32_t)(sum & 0xFFFFFFFFULL);
+        carry = sum >> 32;
+    }
+    *r = res;
+}
+
+static void aura_bn_sub(AuraBN *r, const AuraBN *a, const AuraBN *b) {
+    AuraBN res;
+    aura_bn_zero(&res);
+    int64_t borrow = 0;
+    for (int i = 0; i < 136; i++) {
+        int64_t diff = (int64_t)a->w[i] - (int64_t)b->w[i] - borrow;
+        if (diff < 0) {
+            diff += (1LL << 32);
+            borrow = 1;
+        } else {
+            borrow = 0;
+        }
+        res.w[i] = (uint32_t)diff;
+    }
+    *r = res;
+}
+
+static void aura_bn_shl1(AuraBN *a) {
+    uint32_t carry = 0;
+    for (int i = 0; i < 136; i++) {
+        uint32_t next = a->w[i] >> 31;
+        a->w[i] = (a->w[i] << 1) | carry;
+        carry = next;
+    }
+}
+
+static int aura_bn_highest_bit(const AuraBN *a) {
+    for (int i = 135; i >= 0; i--) {
+        if (a->w[i] != 0) {
+            for (int b = 31; b >= 0; b--) {
+                if ((a->w[i] >> b) & 1) return (i << 5) + b;
+            }
+        }
+    }
+    return -1;
+}
+
+static int aura_bn_get_bit(const AuraBN *a, int bitIdx) {
+    return (a->w[bitIdx >> 5] >> (bitIdx & 31)) & 1;
+}
+
+static void aura_bn_mod(AuraBN *r, const AuraBN *a, const AuraBN *m) {
+    AuraBN rem;
+    aura_bn_zero(&rem);
+    int top = aura_bn_highest_bit(a);
+    for (int i = top; i >= 0; i--) {
+        aura_bn_shl1(&rem);
+        rem.w[0] |= (uint32_t)aura_bn_get_bit(a, i);
+        if (aura_bn_cmp(&rem, m) >= 0) {
+            aura_bn_sub(&rem, &rem, m);
+        }
+    }
+    *r = rem;
+}
+
+static void aura_bn_mul(AuraBN *r, const AuraBN *a, const AuraBN *b) {
+    AuraBN res;
+    aura_bn_zero(&res);
+    for (int i = 0; i < 68; i++) {
+        if (a->w[i] == 0) continue;
+        uint64_t carry = 0;
+        for (int j = 0; j < 68 && (i + j) < 136; j++) {
+            uint64_t prod = (uint64_t)a->w[i] * (uint64_t)b->w[j] + res.w[i + j] + carry;
+            res.w[i + j] = (uint32_t)(prod & 0xFFFFFFFFULL);
+            carry = prod >> 32;
+        }
+        if (i + 68 < 136) res.w[i + 68] += (uint32_t)carry;
+    }
+    *r = res;
+}
+
+static void aura_bn_mod_mul(AuraBN *r, const AuraBN *a, const AuraBN *b, const AuraBN *m) {
+    AuraBN prod;
+    aura_bn_mul(&prod, a, b);
+    aura_bn_mod(r, &prod, m);
+}
+
+static void aura_bn_mod_sub(AuraBN *r, const AuraBN *a, const AuraBN *b, const AuraBN *m) {
+    AuraBN ma, mb;
+    aura_bn_mod(&ma, a, m);
+    aura_bn_mod(&mb, b, m);
+    if (aura_bn_cmp(&ma, &mb) >= 0) {
+        aura_bn_sub(r, &ma, &mb);
+    } else {
+        AuraBN diff;
+        aura_bn_sub(&diff, &mb, &ma);
+        aura_bn_sub(r, m, &diff);
+    }
+}
+
+static void aura_bn_mod_exp(AuraBN *r, const AuraBN *base, const AuraBN *exp, const AuraBN *m) {
+    AuraBN res;
+    aura_bn_zero(&res);
+    res.w[0] = 1;
+    AuraBN b;
+    aura_bn_mod(&b, base, m);
+    int top = aura_bn_highest_bit(exp);
+    for (int i = top; i >= 0; i--) {
+        aura_bn_mod_mul(&res, &res, &res, m);
+        if (aura_bn_get_bit(exp, i)) {
+            aura_bn_mod_mul(&res, &res, &b, m);
+        }
+    }
+    *r = res;
+}
+
+
 @implementation AuraAppleDeveloperAPI {
     void *_cryptoHandle;
     NSString *_pending2FAAdsid;
@@ -413,36 +590,46 @@ static const char *kRFC5054_2048_N_Hex =
 
 - (NSData *)aes256GCMDecryptETData:(NSData *)etData key:(NSData *)skData {
     if (etData.length <= 35 || skData.length < 32) return nil;
-    EVP_CIPHER_CTX_new_fn ctx_new   = (EVP_CIPHER_CTX_new_fn)dlsym(_cryptoHandle, "EVP_CIPHER_CTX_new");
-    EVP_CIPHER_CTX_free_fn ctx_free = (EVP_CIPHER_CTX_free_fn)dlsym(_cryptoHandle, "EVP_CIPHER_CTX_free");
-    EVP_aes_256_gcm_fn aes_gcm      = (EVP_aes_256_gcm_fn)dlsym(_cryptoHandle, "EVP_aes_256_gcm");
-    EVP_DecryptInit_ex_fn dec_init  = (EVP_DecryptInit_ex_fn)dlsym(_cryptoHandle, "EVP_DecryptInit_ex");
-    EVP_CIPHER_CTX_ctrl_fn ctx_ctrl = (EVP_CIPHER_CTX_ctrl_fn)dlsym(_cryptoHandle, "EVP_CIPHER_CTX_ctrl");
-    EVP_DecryptUpdate_fn dec_upd    = (EVP_DecryptUpdate_fn)dlsym(_cryptoHandle, "EVP_DecryptUpdate");
-    EVP_DecryptFinal_ex_fn dec_fin  = (EVP_DecryptFinal_ex_fn)dlsym(_cryptoHandle, "EVP_DecryptFinal_ex");
-    if (!ctx_new || !aes_gcm || !dec_init) return nil;
-
     const unsigned char *etBytes = (const unsigned char *)etData.bytes;
     const unsigned char *ivPtr = etBytes + 3;
     int cipherLen = (int)etData.length - 3 - 16 - 16;
     const unsigned char *cipherPtr = etBytes + 19;
     const unsigned char *tagPtr = etBytes + etData.length - 16;
 
-    EVP_CIPHER_CTX *ctx = ctx_new();
-    NSMutableData *plain = [NSMutableData dataWithLength:cipherLen + 16];
-    int aadLen = 0, outLen = 0, finalLen = 0;
+    // 通道 1：如果加载了 OpenSSL libcrypto (如 Dopamine)，使用原有 EVP_aes_256_gcm
+    if (_cryptoHandle) {
+        EVP_CIPHER_CTX_new_fn ctx_new   = (EVP_CIPHER_CTX_new_fn)dlsym(_cryptoHandle, "EVP_CIPHER_CTX_new");
+        EVP_CIPHER_CTX_free_fn ctx_free = (EVP_CIPHER_CTX_free_fn)dlsym(_cryptoHandle, "EVP_CIPHER_CTX_free");
+        EVP_aes_256_gcm_fn aes_gcm      = (EVP_aes_256_gcm_fn)dlsym(_cryptoHandle, "EVP_aes_256_gcm");
+        EVP_DecryptInit_ex_fn dec_init  = (EVP_DecryptInit_ex_fn)dlsym(_cryptoHandle, "EVP_DecryptInit_ex");
+        EVP_CIPHER_CTX_ctrl_fn ctx_ctrl = (EVP_CIPHER_CTX_ctrl_fn)dlsym(_cryptoHandle, "EVP_CIPHER_CTX_ctrl");
+        EVP_DecryptUpdate_fn dec_upd    = (EVP_DecryptUpdate_fn)dlsym(_cryptoHandle, "EVP_DecryptUpdate");
+        EVP_DecryptFinal_ex_fn dec_fin  = (EVP_DecryptFinal_ex_fn)dlsym(_cryptoHandle, "EVP_DecryptFinal_ex");
+        if (ctx_new && aes_gcm && dec_init) {
+            EVP_CIPHER_CTX *ctx = ctx_new();
+            NSMutableData *plain = [NSMutableData dataWithLength:cipherLen + 16];
+            int aadLen = 0, outLen = 0, finalLen = 0;
+            dec_init(ctx, aes_gcm(), NULL, NULL, NULL);
+            ctx_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, 16, NULL);
+            dec_init(ctx, NULL, NULL, (const unsigned char *)skData.bytes, ivPtr);
+            dec_upd(ctx, NULL, &aadLen, etBytes, 3);
+            dec_upd(ctx, (unsigned char *)plain.mutableBytes, &outLen, cipherPtr, cipherLen);
+            ctx_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, 16, (void *)tagPtr);
+            dec_fin(ctx, (unsigned char *)plain.mutableBytes + outLen, &finalLen);
+            ctx_free(ctx);
+            plain.length = cipherLen;
+            return plain;
+        }
+    }
 
-    dec_init(ctx, aes_gcm(), NULL, NULL, NULL);
-    ctx_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, 16, NULL);
-    dec_init(ctx, NULL, NULL, (const unsigned char *)skData.bytes, ivPtr);
-    dec_upd(ctx, NULL, &aadLen, etBytes, 3);
-    dec_upd(ctx, (unsigned char *)plain.mutableBytes, &outLen, cipherPtr, cipherLen);
-    ctx_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, 16, (void *)tagPtr);
-    dec_fin(ctx, (unsigned char *)plain.mutableBytes + outLen, &finalLen);
-    ctx_free(ctx);
-
-    plain.length = cipherLen;
-    return plain;
+    // 通道 2：使用 iOS 系统自带的 /usr/lib/system/libcommonCrypto.dylib (天然支持 arm64e 与 arm64，无需外部库)
+    AuraCCCryptorGCMOneshotDecrypt_fn ccGCMDecrypt = (AuraCCCryptorGCMOneshotDecrypt_fn)dlsym(RTLD_DEFAULT, "CCCryptorGCMOneshotDecrypt");
+    if (ccGCMDecrypt) {
+        NSMutableData *plain = [NSMutableData dataWithLength:cipherLen];
+        ccGCMDecrypt(kCCAlgorithmAES, skData.bytes, 32, ivPtr, 16, etBytes, 3, cipherPtr, cipherLen, plain.mutableBytes, tagPtr, 16);
+        return plain;
+    }
+    return nil;
 }
 
 #pragma mark - GSA SRP6a 请求
@@ -717,12 +904,7 @@ static const char *kRFC5054_2048_N_Hex =
            twoFactorCode:(NSString *)twoFactorCode
               completion:(void(^)(BOOL success, BOOL need2FA, NSString *errorMsg))completion {
 
-    if (![self loadOpenSSLCryptoLibrary]) {
-        NSString *msg = @"未找到 OpenSSL libcrypto.dylib，请确认 Sileo 中已安装 openssl";
-        [[AuraSignEngine sharedEngine] appendSimpleUserLogWithTitle:@"❌ Apple ID 登录失败" detail:msg success:NO];
-        if (completion) completion(NO, NO, msg);
-        return;
-    }
+    [self loadOpenSSLCryptoLibrary];
 
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
         NSString *username = [[email stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] lowercaseString];
@@ -763,30 +945,17 @@ static const char *kRFC5054_2048_N_Hex =
                 @"X-Mme-Device-Id": udid ?: @""
             };
 
-            BN_new_fn bn_new       = (BN_new_fn)dlsym(_cryptoHandle, "BN_new");
-            BN_free_fn bn_free     = (BN_free_fn)dlsym(_cryptoHandle, "BN_free");
-            BN_CTX_new_fn ctx_new  = (BN_CTX_new_fn)dlsym(_cryptoHandle, "BN_CTX_new");
-            BN_CTX_free_fn ctx_free= (BN_CTX_free_fn)dlsym(_cryptoHandle, "BN_CTX_free");
-            BN_bin2bn_fn bin2bn    = (BN_bin2bn_fn)dlsym(_cryptoHandle, "BN_bin2bn");
-            BN_set_word_fn set_w   = (BN_set_word_fn)dlsym(_cryptoHandle, "BN_set_word");
-            BN_add_fn bn_add       = (BN_add_fn)dlsym(_cryptoHandle, "BN_add");
-            BN_mul_fn bn_mul       = (BN_mul_fn)dlsym(_cryptoHandle, "BN_mul");
-            BN_mod_mul_fn mod_mul  = (BN_mod_mul_fn)dlsym(_cryptoHandle, "BN_mod_mul");
-            BN_mod_sub_fn mod_sub  = (BN_mod_sub_fn)dlsym(_cryptoHandle, "BN_mod_sub");
-            BN_mod_exp_fn mod_exp  = (BN_mod_exp_fn)dlsym(_cryptoHandle, "BN_mod_exp");
-
-            BN_CTX *bnCtx = ctx_new();
             NSData *N_data = [self dataFromHexString:kRFC5054_2048_N_Hex];
-            BIGNUM *bn_N = bin2bn((const unsigned char *)N_data.bytes, (int)N_data.length, NULL);
-            BIGNUM *bn_g = bn_new();
-            set_w(bn_g, 2);
+            AuraBN bn_N, bn_g, bn_a, bn_A;
+            aura_bn_from_bytes(&bn_N, (const unsigned char *)N_data.bytes, (int)N_data.length);
+            aura_bn_zero(&bn_g);
+            bn_g.w[0] = 2;
 
             unsigned char a_bytes[32];
             if (SecRandomCopyBytes(kSecRandomDefault, 32, a_bytes) != 0) arc4random_buf(a_bytes, 32);
-            BIGNUM *bn_a = bin2bn(a_bytes, 32, NULL);
-            BIGNUM *bn_A = bn_new();
-            mod_exp(bn_A, bn_g, bn_a, bn_N, bnCtx);
-            NSData *A_padded = [self bnToPaddedData:bn_A padLength:256];
+            aura_bn_from_bytes(&bn_a, a_bytes, 32);
+            aura_bn_mod_exp(&bn_A, &bn_g, &bn_a, &bn_N);
+            NSData *A_padded = aura_bn_to_padded_data(&bn_A, 256);
 
             NSDictionary *initResp = [self sendGSAServiceRequest:@{
                 @"A2k": A_padded,
@@ -807,7 +976,6 @@ static const char *kRFC5054_2048_N_Hex =
                 NSString *em = initResp[@"Status"][@"em"] ?: @"连接苹果认证服务器超时或网络异常";
                 NSString *msg = [NSString stringWithFormat:@"苹果 GSA 握手失败 (%ld): %@", (long)ec, em];
                 [[AuraSignEngine sharedEngine] appendSimpleUserLogWithTitle:@"❌ Apple ID 登录失败" detail:msg success:NO];
-                bn_free(bn_N); bn_free(bn_g); bn_free(bn_a); bn_free(bn_A); ctx_free(bnCtx);
                 dispatch_async(dispatch_get_main_queue(), ^{
                     if (completion) completion(NO, NO, msg);
                 });
@@ -819,14 +987,15 @@ static const char *kRFC5054_2048_N_Hex =
             NSMutableData *kInput = [NSMutableData dataWithData:N_data];
             [kInput appendData:gPadded];
             NSData *kHash = [self sha256Data:kInput];
-            BIGNUM *bn_k = bin2bn((const unsigned char *)kHash.bytes, 32, NULL);
+            AuraBN bn_k, bn_B, bn_u, bn_x;
+            aura_bn_from_bytes(&bn_k, (const unsigned char *)kHash.bytes, 32);
+            aura_bn_from_bytes(&bn_B, (const unsigned char *)B_data.bytes, (int)B_data.length);
+            NSData *B_padded = aura_bn_to_padded_data(&bn_B, 256);
 
-            BIGNUM *bn_B = bin2bn((const unsigned char *)B_data.bytes, (int)B_data.length, NULL);
-            NSData *B_padded = [self bnToPaddedData:bn_B padLength:256];
             NSMutableData *uInput = [NSMutableData dataWithData:A_padded];
             [uInput appendData:B_padded];
             NSData *uHash = [self sha256Data:uInput];
-            BIGNUM *bn_u = bin2bn((const unsigned char *)uHash.bytes, 32, NULL);
+            aura_bn_from_bytes(&bn_u, (const unsigned char *)uHash.bytes, 32);
 
             NSData *passRawHash = [self sha256Data:[password dataUsingEncoding:NSUTF8StringEncoding]];
             NSData *pbkdfPassInput = passRawHash;
@@ -848,17 +1017,17 @@ static const char *kRFC5054_2048_N_Hex =
             NSMutableData *xInput = [NSMutableData dataWithData:salt];
             [xInput appendData:innerXHash];
             NSData *xHash = [self sha256Data:xInput];
-            BIGNUM *bn_x = bin2bn((const unsigned char *)xHash.bytes, 32, NULL);
+            aura_bn_from_bytes(&bn_x, (const unsigned char *)xHash.bytes, 32);
 
-            BIGNUM *bn_v = bn_new(), *bn_kv = bn_new(), *bn_base = bn_new(), *bn_ux = bn_new(), *bn_exp = bn_new(), *bn_S = bn_new();
-            mod_exp(bn_v, bn_g, bn_x, bn_N, bnCtx);
-            mod_mul(bn_kv, bn_k, bn_v, bn_N, bnCtx);
-            mod_sub(bn_base, bn_B, bn_kv, bn_N, bnCtx);
-            bn_mul(bn_ux, bn_u, bn_x, bnCtx);
-            bn_add(bn_exp, bn_a, bn_ux);
-            mod_exp(bn_S, bn_base, bn_exp, bn_N, bnCtx);
+            AuraBN bn_v, bn_kv, bn_base, bn_ux, bn_exp, bn_S;
+            aura_bn_mod_exp(&bn_v, &bn_g, &bn_x, &bn_N);
+            aura_bn_mod_mul(&bn_kv, &bn_k, &bn_v, &bn_N);
+            aura_bn_mod_sub(&bn_base, &bn_B, &bn_kv, &bn_N);
+            aura_bn_mul(&bn_ux, &bn_u, &bn_x);
+            aura_bn_add(&bn_exp, &bn_a, &bn_ux);
+            aura_bn_mod_exp(&bn_S, &bn_base, &bn_exp, &bn_N);
 
-            NSData *S_padded = [self bnToPaddedData:bn_S padLength:256];
+            NSData *S_padded = aura_bn_to_padded_data(&bn_S, 256);
             NSData *K_data = [self sha256Data:S_padded];
 
             NSData *HN = [self sha256Data:N_data];
@@ -874,11 +1043,6 @@ static const char *kRFC5054_2048_N_Hex =
             [m1Input appendData:B_padded];
             [m1Input appendData:K_data];
             NSData *M1_data = [self sha256Data:m1Input];
-
-            bn_free(bn_N); bn_free(bn_g); bn_free(bn_a); bn_free(bn_A);
-            bn_free(bn_k); bn_free(bn_B); bn_free(bn_u); bn_free(bn_x);
-            bn_free(bn_v); bn_free(bn_kv); bn_free(bn_base); bn_free(bn_ux);
-            bn_free(bn_exp); bn_free(bn_S); ctx_free(bnCtx);
 
             NSDictionary *compResp = [self sendGSAServiceRequest:@{
                 @"M1": M1_data,
