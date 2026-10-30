@@ -1,4 +1,4 @@
-// src/Core/AuraSignEngine.mm
+// src/Core/AuraSignEngine.mm (采用 iOS 17 原生 LSApplicationWorkspace installApplication:withOptions:error: + libmis 注册完整版)
 #import <CoreFoundation/CoreFoundation.h>
 #import "AuraSignEngine.h"
 #import "AuraAppleDeveloperAPI.h"
@@ -18,12 +18,12 @@ extern char **environ;
 @interface NSObject (AuraDynamicPrivateAPIs)
 - (id)anisetteDataWithError:(NSError **)error;
 - (void)anisetteDataWithCompletion:(void(^)(id data, NSError *error))completion;
-- (void)provisionWithCompletion:(void(^)(BOOL succeeded, NSError *error))completion;
 - (NSString *)machineID;
 - (NSString *)oneTimePassword;
 - (unsigned long long)routingInfo;
 + (instancetype)defaultWorkspace;
 - (NSArray *)allInstalledApplications;
+- (BOOL)installApplication:(NSURL *)path withOptions:(NSDictionary *)options error:(NSError **)error;
 - (NSString *)applicationIdentifier;
 - (NSURL *)bundleURL;
 - (NSString *)shortVersionString;
@@ -32,7 +32,8 @@ extern char **environ;
 @end
 
 typedef int (*MISValidateSignatureFunc)(CFStringRef file, CFDictionaryRef options, CFDictionaryRef *info);
-typedef int (*MobileInstallationInstallFunc)(CFStringRef path, CFDictionaryRef options, void *callback, void *userData);
+typedef CFTypeRef (*MISProfileCreateWithDataFunc)(CFAllocatorRef alloc, CFDataRef data);
+typedef int (*MISInstallProvisioningProfileFunc)(CFTypeRef profile);
 
 @implementation AuraAppInfo
 @end
@@ -88,8 +89,6 @@ typedef int (*MobileInstallationInstallFunc)(CFStringRef path, CFDictionaryRef o
     [dict writeToFile:AURA_PREFS_PATH atomically:YES];
 }
 
-#pragma mark - 01. 同步 + 异步双通道获取本机 Anisette 机器码 (并写入详细诊断日志)
-
 - (NSDictionary<NSString *, NSString *> *)fetchNativeAnisetteHeaders {
     __block id anisetteDataObj = nil;
     __block NSError *aniErr = nil;
@@ -97,13 +96,11 @@ typedef int (*MobileInstallationInstallFunc)(CFStringRef path, CFDictionaryRef o
     Class ctrlClass = NSClassFromString(@"AKAnisetteProvisioningController");
     if (ctrlClass) {
         id ctrl = [[ctrlClass alloc] init];
-        // 1. 先尝试同步获取
         if ([ctrl respondsToSelector:@selector(anisetteDataWithError:)]) {
             NSError *syncErr = nil;
             anisetteDataObj = [ctrl anisetteDataWithError:&syncErr];
             aniErr = syncErr;
         }
-        // 2. 若同步返回空，使用异步回调获取
         if (!anisetteDataObj && [ctrl respondsToSelector:@selector(anisetteDataWithCompletion:)]) {
             dispatch_semaphore_t sem = dispatch_semaphore_create(0);
             [ctrl anisetteDataWithCompletion:^(id data, NSError *error) {
@@ -123,8 +120,6 @@ typedef int (*MobileInstallationInstallFunc)(CFStringRef path, CFDictionaryRef o
         NSString *otp = [anisetteDataObj oneTimePassword];
         NSString *mid = [anisetteDataObj machineID];
         NSString *rinfo = [NSString stringWithFormat:@"%llu", [anisetteDataObj routingInfo]];
-        [self appendTimelineLog:[NSString stringWithFormat:@"[ANISETTE] 成功获取本机原生机器码: MD长度=%lu, MID长度=%lu, RINFO=%@",
-                                 (unsigned long)otp.length, (unsigned long)mid.length, rinfo] success:YES];
         return @{
             @"X-Apple-I-MD": otp,
             @"X-Apple-I-MD-M": mid,
@@ -134,14 +129,28 @@ typedef int (*MobileInstallationInstallFunc)(CFStringRef path, CFDictionaryRef o
             @"X-Apple-Locale": @"zh_CN"
         };
     }
-
-    [self appendTimelineLog:[NSString stringWithFormat:@"[ANISETTE-ERROR] 本机 AuthKit 未返回机器码! class=%@, err=%@",
-                             ctrlClass, aniErr.localizedDescription ?: @"nil"] success:NO];
     return @{
         @"X-Apple-I-Client-Time": clientTime,
         @"X-Apple-I-TimeZone": tz,
         @"X-Apple-Locale": @"zh_CN"
     };
+}
+
+// 将 7 天 .mobileprovision 直接注册进未越狱系统 misagent 信任库
+- (void)installProvisioningProfileIntoSystemMIS:(NSData *)profileData {
+    if (!profileData.length) return;
+    void *misHandle = dlopen("/usr/lib/libmis.dylib", RTLD_LAZY);
+    if (!misHandle) return;
+    MISProfileCreateWithDataFunc createFunc = (MISProfileCreateWithDataFunc)dlsym(misHandle, "MISProfileCreateWithData");
+    MISInstallProvisioningProfileFunc installFunc = (MISInstallProvisioningProfileFunc)dlsym(misHandle, "MISInstallProvisioningProfile");
+    if (createFunc && installFunc) {
+        CFTypeRef prof = createFunc(kCFAllocatorDefault, (__bridge CFDataRef)profileData);
+        if (prof) {
+            int ret = installFunc(prof);
+            [self appendTimelineLog:[NSString stringWithFormat:@"[MIS-PROFILE] 已向系统 misagent 注册 7 天描述文件 (ret=%d)", ret] success:(ret == 0)];
+            CFRelease(prof);
+        }
+    }
 }
 
 - (BOOL)verifyUnjailbrokenBootability:(NSString *)bundlePath {
@@ -237,7 +246,7 @@ typedef int (*MobileInstallationInstallFunc)(CFStringRef path, CFDictionaryRef o
             foundLoader = YES;
             if (app.isFakeSigned || !app.isLibmisVerified || app.remainingDays <= 0.0) {
                 if (outSummary) {
-                    *outSummary = [NSString stringWithFormat:@"⚠️ 高危：检测到【%@】当前为假签名或证书已过期！若现在关机重启将无法打开越狱工具，请先绑定 Apple ID 并点下方【立即修复】！", app.appName];
+                    *outSummary = [NSString stringWithFormat:@"⚠️ 高危：检测到【%@】当前为假签名或证书已过期！若现在关机重启将无法打开越狱工具，请点击下方【⚡ 立即修复】！", app.appName];
                 }
                 return AuraShieldStatusDanger;
             }
@@ -265,7 +274,7 @@ typedef int (*MobileInstallationInstallFunc)(CFStringRef path, CFDictionaryRef o
 
 - (void)recursivelyFixInstalldPermissions:(NSString *)rootPath {
     chown(rootPath.UTF8String, 501, 501);
-    chmod(rootPath.UTF8String, 0755);
+    chmod(rootPath.UTF8String, 0777);
     NSDirectoryEnumerator *enumerator = [[NSFileManager defaultManager] enumeratorAtPath:rootPath];
     for (NSString *relPath in enumerator) {
         NSString *fullPath = [rootPath stringByAppendingPathComponent:relPath];
@@ -326,6 +335,8 @@ typedef int (*MobileInstallationInstallFunc)(CFStringRef path, CFDictionaryRef o
     return ok;
 }
 
+#pragma mark - 【关键修复】：使用 iOS 17 原生 LSApplicationWorkspace installApplication:withOptions:error: 安装！
+
 - (BOOL)fastResignApp:(AuraAppInfo *)app
         stripPlugIns:(BOOL)strip
           customName:(NSString *)customName
@@ -354,13 +365,17 @@ typedef int (*MobileInstallationInstallFunc)(CFStringRef path, CFDictionaryRef o
         return NO;
     }
 
+    // 1. 先将该 7 天描述文件注册进系统 misagent 信任库
+    [self installProvisioningProfileIntoSystemMIS:realProfileData];
+
+    // 2. 准备暂存目录
     NSString *publicStaging = @"/var/mobile/Media/PublicStaging";
-    [[NSFileManager defaultManager] createDirectoryAtPath:publicStaging withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions: @(0755)} error:nil];
+    [[NSFileManager defaultManager] createDirectoryAtPath:publicStaging withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions: @(0777)} error:nil];
     chown(publicStaging.UTF8String, 501, 501);
 
     NSString *stageRoot = [publicStaging stringByAppendingPathComponent:[[NSUUID UUID] UUIDString]];
     NSString *payloadDir = [stageRoot stringByAppendingPathComponent:@"Payload"];
-    [[NSFileManager defaultManager] createDirectoryAtPath:payloadDir withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions: @(0755)} error:nil];
+    [[NSFileManager defaultManager] createDirectoryAtPath:payloadDir withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions: @(0777)} error:nil];
 
     NSString *appFolderName = [app.bundlePath lastPathComponent];
     NSString *stagedAppPath = [payloadDir stringByAppendingPathComponent:appFolderName];
@@ -397,6 +412,7 @@ typedef int (*MobileInstallationInstallFunc)(CFStringRef path, CFDictionaryRef o
         }
     }
 
+    // 3. 调用 zsign 对 stagedAppPath 进行真证书签名并输出 signed.ipa
     BOOL zsignOK = [api performRealZSignOnAppBundle:stagedAppPath profileData:realProfileData injectedDylibs:dylibRelPaths error:outError];
     if (!zsignOK) {
         [[NSFileManager defaultManager] removeItemAtPath:stageRoot error:nil];
@@ -406,28 +422,49 @@ typedef int (*MobileInstallationInstallFunc)(CFStringRef path, CFDictionaryRef o
     }
 
     [self recursivelyFixInstalldPermissions:stageRoot];
+    NSString *signedIpaPath = [payloadDir stringByAppendingPathComponent:@"signed.ipa"];
 
-    void *miHandle = dlopen("/System/Library/PrivateFrameworks/MobileInstallation.framework/MobileInstallation", RTLD_LAZY);
-    int installRet = -1;
-    if (miHandle) {
-        MobileInstallationInstallFunc installFunc = (MobileInstallationInstallFunc)dlsym(miHandle, "MobileInstallationInstallForLaunchServices");
-        if (installFunc) {
-            NSDictionary *miOpts = @{@"PackageType": @"Customer"};
-            installRet = installFunc((__bridge CFStringRef)stagedAppPath, (__bridge CFDictionaryRef)miOpts, NULL, NULL);
-        }
+    // 4. 调用 iOS 17 原生 LSApplicationWorkspace installApplication:withOptions:error: 安装！
+    Class wsClass = NSClassFromString(@"LSApplicationWorkspace");
+    id workspace = [wsClass defaultWorkspace];
+    BOOL installSuccess = NO;
+    NSError *lsError = nil;
+
+    // 通道 A：通过 signed.ipa 标准 Customer 模式安装
+    if ([[NSFileManager defaultManager] fileExistsAtPath:signedIpaPath] &&
+        [workspace respondsToSelector:@selector(installApplication:withOptions:error:)]) {
+        NSDictionary *ipaOpts = @{
+            @"CFBundleIdentifier": resolvedBundleID,
+            @"PackageType": @"Customer"
+        };
+        installSuccess = [workspace installApplication:[NSURL fileURLWithPath:signedIpaPath] withOptions:ipaOpts error:&lsError];
+        [self appendTimelineLog:[NSString stringWithFormat:@"[LS-INSTALL-IPA] 【%@】installed=%d, err=%@",
+            app.appName, installSuccess, lsError.localizedDescription ?: @"nil"] success:installSuccess];
+    }
+
+    // 通道 B：若通道 A 未成功，通过 stagedAppPath (.app 目录) Developer 模式安装
+    if (!installSuccess && [[NSFileManager defaultManager] fileExistsAtPath:stagedAppPath] &&
+        [workspace respondsToSelector:@selector(installApplication:withOptions:error:)]) {
+        lsError = nil;
+        NSDictionary *devOpts = @{
+            @"CFBundleIdentifier": resolvedBundleID,
+            @"PackageType": @"Developer"
+        };
+        installSuccess = [workspace installApplication:[NSURL fileURLWithPath:stagedAppPath] withOptions:devOpts error:&lsError];
+        [self appendTimelineLog:[NSString stringWithFormat:@"[LS-INSTALL-DEV] 【%@】installed=%d, err=%@",
+            app.appName, installSuccess, lsError.localizedDescription ?: @"nil"] success:installSuccess];
     }
 
     [[NSFileManager defaultManager] removeItemAtPath:stageRoot error:nil];
 
-    if (installRet != 0) {
+    if (!installSuccess) {
         if (outError) {
-            *outError = [NSError errorWithDomain:@"AuraSign" code:installRet userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"系统 installd 安装返回错误码: %d", installRet]}];
+            *outError = lsError ?: [NSError errorWithDomain:@"AuraSign" code:-1 userInfo:@{NSLocalizedDescriptionKey: @"LSApplicationWorkspace 安装未通过，请复制诊断日志查看详情"}];
         }
-        [self appendTimelineLog:[NSString stringWithFormat:@"[INSTALL-ERR] 【%@】installd 返回: %d", app.appName, installRet] success:NO];
         return NO;
     }
 
-    [self appendTimelineLog:[NSString stringWithFormat:@"[SUCCESS] 已完成【%@】7天真证书签装 (BundleID:%@, libmis:OK)", app.appName, resolvedBundleID] success:YES];
+    [self appendTimelineLog:[NSString stringWithFormat:@"🎉 [RESIGN-SUCCESS] 【%@】已成功签入 7 天苹果真证书并完成覆盖安装！(BundleID:%@)", app.appName, resolvedBundleID] success:YES];
     return YES;
 }
 
@@ -476,7 +513,7 @@ typedef int (*MobileInstallationInstallFunc)(CFStringRef path, CFDictionaryRef o
     if (completion) completion(NO, 0, nil);
 }
 
-#pragma mark - 深度诊断日志系统 (内存实时缓存 + 0666 跨进程文件共享，确保 100% 记录前端 App 日志!)
+#pragma mark - 深度诊断日志系统
 
 static NSMutableArray<NSDictionary *> *gRuntimeMemoryLogs = nil;
 
@@ -489,19 +526,12 @@ static NSMutableArray<NSDictionary *> *gRuntimeMemoryLogs = nil;
 
 - (NSArray<NSDictionary *> *)readAuditTimelineLogs {
     @synchronized (self) {
-        if (!gRuntimeMemoryLogs) {
-            gRuntimeMemoryLogs = [NSMutableArray array];
-        }
+        if (!gRuntimeMemoryLogs) gRuntimeMemoryLogs = [NSMutableArray array];
         NSArray *diskLogs = [NSArray arrayWithContentsOfFile:[self logFilePath]] ?: @[];
-        if (gRuntimeMemoryLogs.count == 0) {
-            return diskLogs;
-        }
-        // 将当前进程内存中的实时日志置于最顶部，确保哪怕文件权限受限也 100% 能复制出刚发生的登录诊断日志！
+        if (gRuntimeMemoryLogs.count == 0) return diskLogs;
         NSMutableArray *merged = [NSMutableArray arrayWithArray:gRuntimeMemoryLogs];
         for (NSDictionary *d in diskLogs) {
-            if (![merged containsObject:d] && merged.count < 80) {
-                [merged addObject:d];
-            }
+            if (![merged containsObject:d] && merged.count < 80) [merged addObject:d];
         }
         return merged;
     }
@@ -509,9 +539,7 @@ static NSMutableArray<NSDictionary *> *gRuntimeMemoryLogs = nil;
 
 - (void)appendTimelineLog:(NSString *)event success:(BOOL)success {
     @synchronized (self) {
-        if (!gRuntimeMemoryLogs) {
-            gRuntimeMemoryLogs = [NSMutableArray array];
-        }
+        if (!gRuntimeMemoryLogs) gRuntimeMemoryLogs = [NSMutableArray array];
         NSDateFormatter *df = [[NSDateFormatter alloc] init];
         df.dateFormat = @"MM-dd HH:mm:ss";
         NSDictionary *entry = @{

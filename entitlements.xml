@@ -8,7 +8,7 @@
     <true/>
     <key>com.apple.private.security.container-required</key>
     <false/>
-    <!-- 1. 国行 iPhone 强制允许使用 WLAN 与蜂窝网络权限 (解决 offline 报错!) -->
+    <!-- 1. 国行联网权限 -->
     <key>com.apple.CommCenter.fine-grained</key>
     <array>
         <string>spi</string>
@@ -21,17 +21,28 @@
     <true/>
     <key>com.apple.security.network.client</key>
     <true/>
-    <!-- 2. AuthKit 苹果认证权限 -->
+    <!-- 2. AuthKit 机器码权限 -->
     <key>com.apple.authkit.client</key>
     <true/>
     <key>com.apple.authkit.client.internal</key>
     <true/>
     <key>com.apple.authkit.client.private</key>
     <true/>
-    <key>com.apple.developer.apple-id-authentication</key>
-    <true/>
-    <!-- 3. 安装与校验权限 -->
+    <!-- 3. 【关键修复】：allowedSPI 必须是包含 Install / InstallForLaunchServices 的数组，否则 installd 返回 -1！ -->
     <key>com.apple.private.mobileinstall.allowedSPI</key>
+    <array>
+        <string>Install</string>
+        <string>InstallForLaunchServices</string>
+        <string>InstallLocalProvisioned</string>
+        <string>Uninstall</string>
+        <string>UninstallForLaunchServices</string>
+        <string>Browse</string>
+        <string>Lookup</string>
+        <string>Archive</string>
+        <string>RemoveArchive</string>
+        <string>CheckCapabilitiesMatch</string>
+    </array>
+    <key>com.apple.lsapplicationworkspace.rebuildappdatabases</key>
     <true/>
     <key>com.apple.private.misagent</key>
     <true/>

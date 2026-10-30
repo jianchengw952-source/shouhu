@@ -1018,29 +1018,31 @@ static const char *kRFC5054_2048_N_Hex =
 
     NSDictionary *sess = [NSDictionary dictionaryWithContentsOfFile:[self sessionFilePath]];
     NSString *teamId = sess[@"teamId"];
-    NSString *targetBundleID = bundleID ?: @"com.aurasign.app";
+    NSString *rawBundleID = bundleID ?: @"com.aurasign.app";
+    NSString *suffixedBundleID = [rawBundleID hasSuffix:teamId] ? rawBundleID : [NSString stringWithFormat:@"%@.%@", rawBundleID, teamId];
 
-    if (![targetBundleID hasSuffix:teamId] && [targetBundleID componentsSeparatedByString:@"."].count <= 3) {
-        targetBundleID = [NSString stringWithFormat:@"%@.%@", targetBundleID, teamId];
-    }
-    if (outResolvedBundleID) *outResolvedBundleID = targetBundleID;
-
+    // 1. 先查询当前账号下已有的 App IDs (若像 Dopamine 这样原本就在该账号下，直接原位匹配，不改 Bundle ID！)
     NSString *realAppIdPrimaryKey = nil;
+    NSString *targetBundleID = rawBundleID;
+
     NSDictionary *listResp = [self sendQH65B2Request:@"ios/listAppIds.action" bodyDict:@{@"teamId": teamId} session:sess outError:NULL];
     NSArray *existingAppIds = listResp[@"appIds"];
     if ([existingAppIds isKindOfClass:[NSArray class]]) {
         for (NSDictionary *item in existingAppIds) {
-            if ([item[@"identifier"] isEqualToString:targetBundleID] || [item[@"identifier"] isEqualToString:bundleID]) {
+            NSString *ident = item[@"identifier"];
+            if ([ident isEqualToString:rawBundleID] || [ident isEqualToString:suffixedBundleID]) {
                 realAppIdPrimaryKey = item[@"appIdId"];
-                targetBundleID = item[@"identifier"];
-                if (outResolvedBundleID) *outResolvedBundleID = targetBundleID;
+                targetBundleID = ident;
                 break;
             }
         }
     }
 
+    // 2. 若当前账号下还没有该软件的 App ID（例如之前用别的证书签的 Relaxin 或 JavDB），自动使用带 .TeamID 的唯一标识注册！
     if (!realAppIdPrimaryKey.length) {
-        NSString *safeAppIdName = [NSString stringWithFormat:@"Xcode iOS App ID %@", [targetBundleID stringByReplacingOccurrencesOfString:@"." withString:@" "]];
+        targetBundleID = suffixedBundleID;
+        NSString *safeAppIdName = [NSString stringWithFormat:@"Xcode iOS App ID %@",
+            [[targetBundleID componentsSeparatedByCharactersInSet:[[NSCharacterSet alphanumericCharacterSet] invertedSet]] componentsJoinedByString:@" "]];
 
         NSError *addErr = nil;
         NSDictionary *addResp = [self sendQH65B2Request:@"ios/addAppId.action" bodyDict:@{
@@ -1060,6 +1062,9 @@ static const char *kRFC5054_2048_N_Hex =
         }
     }
 
+    if (outResolvedBundleID) *outResolvedBundleID = targetBundleID;
+
+    // 3. 下载 7 天 .mobileprovision 描述文件
     NSError *dlErr = nil;
     NSDictionary *profResp = [self sendQH65B2Request:@"ios/downloadTeamProvisioningProfile.action" bodyDict:@{
         @"teamId": teamId,
@@ -1093,7 +1098,6 @@ static const char *kRFC5054_2048_N_Hex =
     return nil;
 }
 
-// 【关键优化】：支持直接使用 -k dev_key.pem -c apple_dev.cer 签名，100% 兼容 OpenSSL 3.0 与所有版本 zsign！
 - (BOOL)performRealZSignOnAppBundle:(NSString *)appBundlePath
                         profileData:(NSData *)mobileProvisionData
                      injectedDylibs:(NSArray<NSString *> *)dylibPaths
@@ -1116,10 +1120,15 @@ static const char *kRFC5054_2048_N_Hex =
         return NO;
     }
 
+    // 同时在同级目录输出打包好的 signed.ipa 供 LSApplicationWorkspace 安装
+    NSString *signedIpaPath = [[appBundlePath stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"signed.ipa"];
+
     NSMutableArray<NSString *> *args = [NSMutableArray arrayWithObjects:
         @"-k", [self keyPemFilePath],
         @"-c", [self cerFilePath],
         @"-m", provPath,
+        @"-o", signedIpaPath,
+        @"-z", @"1",
         @"-f", nil];
 
     for (NSString *dylib in dylibPaths) {
@@ -1128,7 +1137,8 @@ static const char *kRFC5054_2048_N_Hex =
     [args addObject:appBundlePath];
 
     int ret = [self runProcess:zsignBin args:args];
-    [[AuraSignEngine sharedEngine] appendTimelineLog:[NSString stringWithFormat:@"[ZSIGN-RUN] zsign 签名完成: 返回码=%d", ret] success:(ret == 0)];
+    [[AuraSignEngine sharedEngine] appendTimelineLog:[NSString stringWithFormat:@"[ZSIGN-RUN] zsign 签名完成: 返回码=%d, ipaExists=%d",
+        ret, [[NSFileManager defaultManager] fileExistsAtPath:signedIpaPath]] success:(ret == 0)];
 
     if (ret != 0 && outError) {
         *outError = [NSError errorWithDomain:@"AuraSign" code:ret userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"zsign 签名失败 (返回码: %d)", ret]}];
