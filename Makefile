@@ -27,7 +27,7 @@ aurasignd_FILES = src/Daemon/aurasignd.mm src/Core/AuraSignEngine.mm src/Core/Au
 aurasignd_FRAMEWORKS = Foundation UIKit CoreGraphics Security SystemConfiguration AudioToolbox
 aurasignd_LIBRARIES = z sqlite3
 aurasignd_CODESIGN_FLAGS = -Sentitlements.xml
-aurasignd_CFLAGS = -fobjc-arc -Isrc/Core -Wno-deprecated-declarations -Wno-unused-result
+aurasignd_CFLAGS = -fobjc-arc -Isrc/Core -Isrc/App -Wno-deprecated-declarations -Wno-unused-result
 aurasignd_INSTALL_PATH = /usr/bin
 
 # 3. 关机掉签强拦截与越狱工具内嵌液态胶囊插件 AuraSignShield.dylib

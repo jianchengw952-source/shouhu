@@ -2,7 +2,6 @@
 #import <CoreFoundation/CoreFoundation.h>
 #import "AuraSignEngine.h"
 #import "AuraAppleDeveloperAPI.h"
-#import "AuraLiquidGlassView.h"
 #import <AudioToolbox/AudioToolbox.h>
 #import <notify.h>
 #import <dlfcn.h>
@@ -48,6 +47,12 @@ extern char **environ;
 - (void)setBody:(NSString *)body;
 - (void)setSound:(id)sound;
 + (id)defaultSound;
+@end
+
+@interface NSObject (AuraDynamicGlassView)
+- (instancetype)initWithFrame:(CGRect)frame cornerRadius:(CGFloat)radius;
+- (void)setTintLevel:(float)level;
+- (void)setAccentGlowColor:(UIColor *)color;
 @end
 
 typedef CFTypeRef (*MISProfileCreateWithDataFunc)(CFAllocatorRef allocator, CFDataRef data);
@@ -329,9 +334,18 @@ static UIWindow *gInAppBannerWindow = nil;
             gInAppBannerWindow.frame = CGRectMake(bannerX, -130.0, bannerW, bannerH);
             gInAppBannerWindow.hidden = NO;
 
-            AuraLiquidGlassView *pill = [[AuraLiquidGlassView alloc] initWithFrame:CGRectMake(0, 0, bannerW, bannerH) cornerRadius:24.0];
-            pill.tintLevel = 0.38f;
-            pill.accentGlowColor = [UIColor colorWithRed:0.08 green:0.38 blue:0.28 alpha:1.0];
+            Class glassCls = NSClassFromString(@"AuraLiquidGlassView");
+            UIView *pill = nil;
+            if (glassCls) {
+                pill = [(id)[glassCls alloc] initWithFrame:CGRectMake(0, 0, bannerW, bannerH) cornerRadius:24.0];
+                ((void (*)(id, SEL, float))objc_msgSend)(pill, sel_registerName("setTintLevel:"), 0.38f);
+                ((void (*)(id, SEL, id))objc_msgSend)(pill, sel_registerName("setAccentGlowColor:"), [UIColor colorWithRed:0.08 green:0.38 blue:0.28 alpha:1.0]);
+            } else {
+                pill = [[UIView alloc] initWithFrame:CGRectMake(0, 0, bannerW, bannerH)];
+                pill.backgroundColor = [UIColor colorWithWhite:0.12 alpha:0.92];
+                pill.layer.cornerRadius = 24.0;
+                pill.clipsToBounds = YES;
+            }
 
             UIImageView *iconView = [[UIImageView alloc] initWithFrame:CGRectMake(14, 13, 22, 22)];
             iconView.layer.cornerRadius = 5.5;
