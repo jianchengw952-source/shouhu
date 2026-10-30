@@ -39,6 +39,17 @@ extern char **environ;
 - (NSString *)applicationType;
 @end
 
+@interface NSObject (AuraUserNotificationsPrivate)
++ (id)currentNotificationCenter;
+- (instancetype)initWithBundleIdentifier:(NSString *)bundleId;
+- (void)requestAuthorizationWithOptions:(NSUInteger)options completionHandler:(void (^)(BOOL granted, NSError *error))completionHandler;
+- (void)addNotificationRequest:(id)request withCompletionHandler:(void (^)(NSError *error))completionHandler;
+- (void)setTitle:(NSString *)title;
+- (void)setBody:(NSString *)body;
+- (void)setSound:(id)sound;
++ (id)defaultSound;
+@end
+
 typedef CFTypeRef (*MISProfileCreateWithDataFunc)(CFAllocatorRef allocator, CFDataRef data);
 typedef int (*MISInstallProvisioningProfileFunc)(CFTypeRef profile);
 
