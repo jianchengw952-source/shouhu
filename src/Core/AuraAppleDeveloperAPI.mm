@@ -1,4 +1,4 @@
-// src/Core/AuraAppleDeveloperAPI.mm (恢复 23:56 成功的 GSA-INIT + 严格对齐 apple-corecrypto/ccsrp_priv.h 源码版)
+// src/Core/AuraAppleDeveloperAPI.mm (第1/2步保持 iPhone 标识通过 ec=0 + 第3步切换 Mac15,7 标识绕过苹果 10月22日 -80046 限制终极版)
 #import <CoreFoundation/CoreFoundation.h>
 #import <UIKit/UIKit.h>
 #import <CommonCrypto/CommonDigest.h>
@@ -242,7 +242,6 @@ static const char *kRFC5054_2048_N_Hex =
     return data;
 }
 
-// 对应 apple-corecrypto 的 ccsrp_export_ccn (固定前置补 0 至 256 字节)
 - (NSData *)bnToPaddedData:(BIGNUM *)bn padLength:(int)padLen {
     BN_num_bits_fn num_bits = (BN_num_bits_fn)dlsym(_cryptoHandle, "BN_num_bits");
     BN_bn2bin_fn bn2bin     = (BN_bn2bin_fn)dlsym(_cryptoHandle, "BN_bn2bin");
@@ -254,7 +253,6 @@ static const char *kRFC5054_2048_N_Hex =
     return outData;
 }
 
-// spd 解密：AES-256-CBC + PKCS#7 Padding (对应 AltSign 的 ALTDecryptDataCBC)
 - (NSData *)aes256CBCDecryptData:(NSData *)cipherData key:(NSData *)keyData iv:(NSData *)ivData {
     if (!cipherData.length || keyData.length < 32 || ivData.length < 16) return nil;
     size_t bufferSize = cipherData.length + kCCBlockSizeAES128;
@@ -279,7 +277,6 @@ static const char *kRFC5054_2048_N_Hex =
     return nil;
 }
 
-// et 解密：带 3 字节 "XYZ" AAD 头的 AES-256-GCM (对应 AltSign 的 ALTDecryptDataGCM)
 - (NSData *)aes256GCMDecryptETData:(NSData *)etData key:(NSData *)skData {
     if (etData.length <= 35 || skData.length < 32) return nil;
     EVP_CIPHER_CTX_new_fn ctx_new   = (EVP_CIPHER_CTX_new_fn)dlsym(_cryptoHandle, "EVP_CIPHER_CTX_new");
@@ -315,7 +312,7 @@ static const char *kRFC5054_2048_N_Hex =
     return plain;
 }
 
-#pragma mark - GSA SRP6a 请求 (恢复 23:56 已验证通过的 iPhone 17.0.3 请求头)
+#pragma mark - 【关键突破】：init/complete 用 iPhone 标识，apptokens 切换为 Mac15,7 标识绕过 -80046！
 
 - (NSDictionary *)sendGSAServiceRequest:(NSDictionary *)requestDict {
     NSDictionary *rootPlist = @{
@@ -324,13 +321,28 @@ static const char *kRFC5054_2048_N_Hex =
     };
     NSData *bodyData = [NSPropertyListSerialization dataWithPropertyList:rootPlist format:NSPropertyListXMLFormat_v1_0 options:0 error:NULL];
 
-    // 使用昨晚 23:56 已验证 100% 通过 GSA-INIT 的请求头！
-    NSDictionary *headers = @{
-        @"Content-Type": @"text/x-xml-plist",
-        @"Accept": @"*/*",
-        @"User-Agent": @"akd/1.0 CFNetwork/1474 Darwin/23.0.0",
-        @"X-MMe-Client-Info": @"<iPhone15,2> <iPhone OS;17.0.3;21A360> <com.apple.akd/1.0 (com.apple.akd/1.0)>"
-    };
+    BOOL isAppTokensRequest = [requestDict[@"o"] isEqualToString:@"apptokens"];
+    NSDictionary *headers = nil;
+
+    if (isAppTokensRequest) {
+        // 第 3 步 (apptokens 索取 com.apple.gs.xcode.auth)：必须声明为 Mac15,7 + Xcode 27.0，完美绕过苹果 10月22日 新增的 -80046 限制！
+        headers = @{
+            @"Content-Type": @"text/x-xml-plist",
+            @"Accept": @"text/x-xml-plist",
+            @"User-Agent": @"akd/1.0 CFNetwork/808.1.4",
+            @"X-MMe-Client-Info": @"<Mac15,7> <macOS;27.0;26A5378j> <com.apple.AuthKit/1 (com.apple.akd/1.0)>",
+            @"X-Xcode-Version": @"27.0 (27A5218g)",
+            @"X-Apple-App-Info": @"com.apple.gs.xcode.auth"
+        };
+    } else {
+        // 第 1、2 步 (init 与 complete)：保持与本机 Anisette 匹配的 iPhone15,2 标识（已验证 ec=0 一次过！）
+        headers = @{
+            @"Content-Type": @"text/x-xml-plist",
+            @"Accept": @"*/*",
+            @"User-Agent": @"akd/1.0 CFNetwork/1474 Darwin/23.0.0",
+            @"X-MMe-Client-Info": @"<iPhone15,2> <iPhone OS;17.0.3;21A360> <com.apple.akd/1.0 (com.apple.akd/1.0)>"
+        };
+    }
 
     int curlExit = 0;
     NSData *respData = [self executeCurlRequestWithURL:@"https://gsa.apple.com/grandslam/GsService2"
@@ -350,7 +362,6 @@ static const char *kRFC5054_2048_N_Hex =
     return nil;
 }
 
-// 触发苹果向本机推送 6 位验证码弹窗，并在第 2 步调用 GsService2/validate 校验验证码 (对齐 AltSign)
 - (void)triggerTrustedDevice2FAPushWithADSID:(NSString *)adsid idmsToken:(NSString *)idmsToken anisette:(NSDictionary *)anisette {
     NSString *rawToken = [NSString stringWithFormat:@"%@:%@", adsid, idmsToken];
     NSString *b64Token = [[rawToken dataUsingEncoding:NSUTF8StringEncoding] base64EncodedStringWithOptions:0];
@@ -361,7 +372,7 @@ static const char *kRFC5054_2048_N_Hex =
     headers[@"User-Agent"] = @"Xcode";
     headers[@"Accept-Language"] = @"zh-cn";
     headers[@"X-Apple-App-Info"] = @"com.apple.gs.xcode.auth";
-    headers[@"X-Xcode-Version"] = @"11.2 (11B41)";
+    headers[@"X-Xcode-Version"] = @"27.0 (27A5218g)";
     headers[@"X-MMe-Client-Info"] = @"<iPhone15,2> <iPhone OS;17.0.3;21A360> <com.apple.akd/1.0 (com.apple.akd/1.0)>";
     headers[@"X-Apple-Identity-Token"] = b64Token;
     NSString *udid = [self realDeviceUDID];
@@ -385,7 +396,7 @@ static const char *kRFC5054_2048_N_Hex =
     headers[@"User-Agent"] = @"Xcode";
     headers[@"Accept-Language"] = @"zh-cn";
     headers[@"X-Apple-App-Info"] = @"com.apple.gs.xcode.auth";
-    headers[@"X-Xcode-Version"] = @"11.2 (11B41)";
+    headers[@"X-Xcode-Version"] = @"27.0 (27A5218g)";
     headers[@"X-MMe-Client-Info"] = @"<iPhone15,2> <iPhone OS;17.0.3;21A360> <com.apple.akd/1.0 (com.apple.akd/1.0)>";
     headers[@"X-Apple-Identity-Token"] = b64Token;
     headers[@"security-code"] = code;
@@ -421,7 +432,6 @@ static const char *kRFC5054_2048_N_Hex =
         NSDictionary *anisette = [[AuraSignEngine sharedEngine] fetchNativeAnisetteHeaders];
         NSString *udid = [self realDeviceUDID];
 
-        // 如果当前是第 2 步（已填入 6 位验证码），先调用 AltSign 同款的 GsService2/validate 接口核验 6 位验证码！
         if (twoFactorCode.length == 6 && _pending2FAAdsid.length && _pending2FAIdmsToken.length) {
             BOOL codeValid = [self validate2FACodeWithAltSignEndpoint:twoFactorCode adsid:_pending2FAAdsid idmsToken:_pending2FAIdmsToken anisette:anisette];
             if (!codeValid) {
@@ -432,7 +442,6 @@ static const char *kRFC5054_2048_N_Hex =
             }
         }
 
-        // 恢复昨晚 23:56 已验证通过的 cpd 字典（X-Apple-I-MD-RINFO 必须为 NSNumber <integer>！）
         NSDictionary *cpd = @{
             @"bootstrap": @YES,
             @"icscrec": @YES,
@@ -504,8 +513,7 @@ static const char *kRFC5054_2048_N_Hex =
             return;
         }
 
-        // ==================== GSA Step 2: 100% 按 apple-corecrypto/ccsrp_priv.h 计算 ====================
-        // 1. ccsrp_generate_k: k = SHA256(PAD(N, 256) || PAD(g, 256))
+        // ==================== GSA Step 2: complete ====================
         NSMutableData *gPadded = [NSMutableData dataWithLength:256];
         ((unsigned char *)gPadded.mutableBytes)[255] = 0x02;
         NSMutableData *kInput = [NSMutableData dataWithData:N_data];
@@ -513,7 +521,6 @@ static const char *kRFC5054_2048_N_Hex =
         NSData *kHash = [self sha256Data:kInput];
         BIGNUM *bn_k = bin2bn((const unsigned char *)kHash.bytes, 32, NULL);
 
-        // 2. ccsrp_generate_u: u = SHA256(PAD(A, 256) || PAD(B, 256))
         BIGNUM *bn_B = bin2bn((const unsigned char *)B_data.bytes, (int)B_data.length, NULL);
         NSData *B_padded = [self bnToPaddedData:bn_B padLength:256];
         NSMutableData *uInput = [NSMutableData dataWithData:A_padded];
@@ -521,7 +528,6 @@ static const char *kRFC5054_2048_N_Hex =
         NSData *uHash = [self sha256Data:uInput];
         BIGNUM *bn_u = bin2bn((const unsigned char *)uHash.bytes, 32, NULL);
 
-        // 3. ccsrp_generate_x (noUsernameInX = true): x = SHA256(salt || SHA256(":" || pbkdfOut))
         NSData *passRawHash = [self sha256Data:[password dataUsingEncoding:NSUTF8StringEncoding]];
         NSData *pbkdfPassInput = passRawHash;
         if ([proto isEqualToString:@"s2k_fo"]) {
@@ -545,7 +551,6 @@ static const char *kRFC5054_2048_N_Hex =
         NSData *xHash = [self sha256Data:xInput];
         BIGNUM *bn_x = bin2bn((const unsigned char *)xHash.bytes, 32, NULL);
 
-        // 4. ccsrp_generate_client_S: S = ((B - k * (g^x mod N)) ^ (a + u * x)) mod N, K = SHA256(PAD(S, 256))
         BIGNUM *bn_v = bn_new();
         BIGNUM *bn_kv = bn_new();
         BIGNUM *bn_base = bn_new();
@@ -563,7 +568,6 @@ static const char *kRFC5054_2048_N_Hex =
         NSData *S_padded = [self bnToPaddedData:bn_S padLength:256];
         NSData *K_data = [self sha256Data:S_padded];
 
-        // 5. ccsrp_generate_M: M1 = SHA256((SHA256(PAD(N,256)) ^ SHA256(PAD(g,256))) || SHA256(username) || salt || PAD(A,256) || PAD(B,256) || K)
         NSData *HN = [self sha256Data:N_data];
         NSData *Hg = [self sha256Data:gPadded];
         unsigned char hXor[32];
@@ -608,7 +612,6 @@ static const char *kRFC5054_2048_N_Hex =
             return;
         }
 
-        // 使用 AES-256-CBC + PKCS#7 解密 spd 数据包
         NSDictionary *spdDict = nil;
         if ([spdData isKindOfClass:[NSData class]] && spdData.length > 16) {
             NSData *extraKey = [self hmacSHA256WithKey:K_data data:[@"extra data key:" dataUsingEncoding:NSUTF8StringEncoding]];
@@ -651,7 +654,7 @@ static const char *kRFC5054_2048_N_Hex =
             return;
         }
 
-        // ==================== GSA Step 3: 发送 apptokens 兑换 com.apple.gs.xcode.auth ====================
+        // ==================== GSA Step 3: 发送 apptokens (自动切换为 Mac15,7 标识绕过 -80046) ====================
         NSString *appName = @"com.apple.gs.xcode.auth";
         NSMutableData *chkInput = [NSMutableData dataWithData:[@"apptokens" dataUsingEncoding:NSUTF8StringEncoding]];
         [chkInput appendData:[adsid dataUsingEncoding:NSUTF8StringEncoding]];
@@ -668,7 +671,13 @@ static const char *kRFC5054_2048_N_Hex =
             @"u": adsid
         }];
 
+        NSInteger appTokEc = [appTokResp[@"Status"][@"ec"] integerValue];
+        NSString *appTokEm = appTokResp[@"Status"][@"em"] ?: @"";
         NSData *etData = appTokResp[@"et"];
+
+        [[AuraSignEngine sharedEngine] appendTimelineLog:[NSString stringWithFormat:@"[GSA-APPTOKENS] ec=%ld, em=%@, etLen=%lu",
+            (long)appTokEc, appTokEm, (unsigned long)etData.length] success:(etData.length > 0)];
+
         NSString *xcodeToken = nil;
         if ([etData isKindOfClass:[NSData class]] && etData.length > 35) {
             NSData *decEt = [self aes256GCMDecryptETData:etData key:skData];
@@ -687,7 +696,7 @@ static const char *kRFC5054_2048_N_Hex =
 
         if (!xcodeToken.length) {
             dispatch_async(dispatch_get_main_queue(), ^{
-                if (completion) completion(NO, NO, @"未能从 GSA 兑换出 Xcode 令牌，请复制诊断日志查看详情");
+                if (completion) completion(NO, NO, [NSString stringWithFormat:@"兑换 Xcode 令牌失败 (%ld: %@)，请复制诊断日志", (long)appTokEc, appTokEm]);
             });
             return;
         }
@@ -812,7 +821,8 @@ static const char *kRFC5054_2048_N_Hex =
     if ([session[@"adsid"] length]) headers[@"X-Apple-I-Identity-Id"] = session[@"adsid"];
     if ([session[@"xcodeToken"] length]) headers[@"X-Apple-GS-Token"] = session[@"xcodeToken"];
     headers[@"User-Agent"] = @"Xcode";
-    headers[@"X-Xcode-Version"] = @"15.2 (15C500b)";
+    headers[@"X-Xcode-Version"] = @"27.0 (27A5218g)";
+    headers[@"X-MMe-Client-Info"] = @"<Mac15,7> <macOS;27.0;26A5378j> <com.apple.AuthKit/1 (com.apple.akd/1.0)>";
     headers[@"Content-Type"] = @"text/x-xml-plist";
     headers[@"Accept"] = @"text/x-xml-plist";
 
