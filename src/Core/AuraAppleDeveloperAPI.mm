@@ -1,4 +1,4 @@
-// src/Core/AuraAppleDeveloperAPI.mm (修正 /services/QH65B2/ 官方路径 + 补齐 X-Apple-App-Info 请求头 + 503 自动重试终极版)
+// src/Core/AuraAppleDeveloperAPI.mm (采用 AltSign#47 新版 User-Agent 彻底解决苹果 503 HTML 拦截 + 令牌缓存终极版)
 #import <CoreFoundation/CoreFoundation.h>
 #import <UIKit/UIKit.h>
 #import <CommonCrypto/CommonDigest.h>
@@ -68,6 +68,9 @@ static const char *kRFC5054_2048_N_Hex =
     void *_cryptoHandle;
     NSString *_pending2FAAdsid;
     NSString *_pending2FAIdmsToken;
+    NSString *_cachedEmail;
+    NSString *_cachedAdsid;
+    NSString *_cachedXcodeToken;
 }
 
 + (instancetype)sharedAPI {
@@ -140,6 +143,9 @@ static const char *kRFC5054_2048_N_Hex =
 }
 
 - (void)logoutCurrentAccount {
+    _cachedEmail = nil;
+    _cachedAdsid = nil;
+    _cachedXcodeToken = nil;
     [[NSFileManager defaultManager] removeItemAtPath:[self sessionFilePath] error:nil];
     [[NSFileManager defaultManager] removeItemAtPath:[self p12FilePath] error:nil];
 }
@@ -215,7 +221,8 @@ static const char *kRFC5054_2048_N_Hex =
     NSString *reqFile  = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"aura_req_%@.dat", uuid]];
     NSString *respFile = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"aura_resp_%@.dat", uuid]];
 
-    NSMutableArray<NSString *> *args = [NSMutableArray arrayWithObjects:@"-s", @"-k", @"--connect-timeout", @"15", @"--max-time", @"25", @"-X", (httpMethod ?: @"POST"), urlStr, nil];
+    // 加入 --http1.1 防止苹果 CDN 在 HTTP/2 连接复用时掐断第 3~4 个请求！
+    NSMutableArray<NSString *> *args = [NSMutableArray arrayWithObjects:@"-s", @"-k", @"--http1.1", @"--connect-timeout", @"15", @"--max-time", @"25", @"-X", (httpMethod ?: @"POST"), urlStr, nil];
 
     [headers enumerateKeysAndObjectsUsingBlock:^(NSString *k, NSString *v, BOOL *stop) {
         [args addObjectsFromArray:@[@"-H", [NSString stringWithFormat:@"%@: %@", k, v]]];
@@ -236,7 +243,7 @@ static const char *kRFC5054_2048_N_Hex =
     return respData;
 }
 
-#pragma mark - 密码学辅助函数 (1:1 对齐 apple-corecrypto/ccsrp_priv.h)
+#pragma mark - 密码学辅助函数
 
 - (NSData *)sha256Data:(NSData *)input {
     unsigned char hash[CC_SHA256_DIGEST_LENGTH];
@@ -333,7 +340,7 @@ static const char *kRFC5054_2048_N_Hex =
     return plain;
 }
 
-#pragma mark - GSA SRP6a 请求 (自带 503 自动重试)
+#pragma mark - 【核心修复】：统一采用 AltSign#47 的 AuthKit/1 (com.apple.dt.Xcode/3594.4.1) User-Agent 彻底消除 503！
 
 - (NSDictionary *)sendGSAServiceRequest:(NSDictionary *)requestDict {
     NSDictionary *rootPlist = @{
@@ -349,7 +356,7 @@ static const char *kRFC5054_2048_N_Hex =
         headers = @{
             @"Content-Type": @"text/x-xml-plist",
             @"Accept": @"text/x-xml-plist",
-            @"User-Agent": @"akd/1.0 CFNetwork/808.1.4",
+            @"User-Agent": @"AuthKit/1 (com.apple.dt.Xcode/3594.4.1)",
             @"X-MMe-Client-Info": @"<Mac15,7> <macOS;27.0;26A5378j> <com.apple.AuthKit/1 (com.apple.akd/1.0)>",
             @"X-Xcode-Version": @"27.0 (27A5218g)",
             @"X-Apple-App-Info": @"com.apple.gs.xcode.auth"
@@ -358,15 +365,14 @@ static const char *kRFC5054_2048_N_Hex =
         headers = @{
             @"Content-Type": @"text/x-xml-plist",
             @"Accept": @"*/*",
-            @"User-Agent": @"akd/1.0 CFNetwork/1474 Darwin/23.0.0",
+            @"User-Agent": @"AuthKit/1 (com.apple.dt.Xcode/3594.4.1)",
             @"X-MMe-Client-Info": @"<iPhone15,2> <iPhone OS;17.0.3;21A360> <com.apple.akd/1.0 (com.apple.akd/1.0)>"
         };
     }
 
-    // 遇到苹果 CDN 偶发 503 Service Temporarily Unavailable 时自动等待 1.5 秒重试（最多 3 次）
     int curlExit = 0;
     NSData *respData = nil;
-    for (int attempt = 1; attempt <= 3; attempt++) {
+    for (int attempt = 1; attempt <= 4; attempt++) {
         respData = [self executeCurlRequestWithURL:@"https://gsa.apple.com/grandslam/GsService2"
                                             method:@"POST"
                                            headers:headers
@@ -378,11 +384,11 @@ static const char *kRFC5054_2048_N_Hex =
                 return parsed[@"Response"] ?: parsed;
             }
         }
-        [NSThread sleepForTimeInterval:1.5];
+        [NSThread sleepForTimeInterval:1.2];
     }
 
     NSString *rawPreview = [[NSString alloc] initWithData:respData encoding:NSUTF8StringEncoding] ?: @"non-utf8";
-    if (rawPreview.length > 120) rawPreview = [rawPreview substringToIndex:120];
+    if (rawPreview.length > 100) rawPreview = [rawPreview substringToIndex:100];
     [[AuraSignEngine sharedEngine] appendTimelineLog:[NSString stringWithFormat:@"[GSA-CURL-ERR] exit=%d, len=%lu, raw=%@", curlExit, (unsigned long)respData.length, rawPreview] success:NO];
     return nil;
 }
@@ -394,7 +400,7 @@ static const char *kRFC5054_2048_N_Hex =
     NSMutableDictionary *headers = [NSMutableDictionary dictionaryWithDictionary:anisette];
     headers[@"Content-Type"] = @"text/x-xml-plist";
     headers[@"Accept"] = @"text/x-xml-plist";
-    headers[@"User-Agent"] = @"Xcode";
+    headers[@"User-Agent"] = @"AuthKit/1 (com.apple.dt.Xcode/3594.4.1)";
     headers[@"Accept-Language"] = @"zh-cn";
     headers[@"X-Apple-App-Info"] = @"com.apple.gs.xcode.auth";
     headers[@"X-Xcode-Version"] = @"27.0 (27A5218g)";
@@ -418,7 +424,7 @@ static const char *kRFC5054_2048_N_Hex =
     NSMutableDictionary *headers = [NSMutableDictionary dictionaryWithDictionary:anisette];
     headers[@"Content-Type"] = @"text/x-xml-plist";
     headers[@"Accept"] = @"text/x-xml-plist";
-    headers[@"User-Agent"] = @"Xcode";
+    headers[@"User-Agent"] = @"AuthKit/1 (com.apple.dt.Xcode/3594.4.1)";
     headers[@"Accept-Language"] = @"zh-cn";
     headers[@"X-Apple-App-Info"] = @"com.apple.gs.xcode.auth";
     headers[@"X-Xcode-Version"] = @"27.0 (27A5218g)";
@@ -440,7 +446,7 @@ static const char *kRFC5054_2048_N_Hex =
     return (ec == 0);
 }
 
-#pragma mark - 完整 GSA SRP6a 握手 + 兑换 com.apple.gs.xcode.auth 令牌 + 请求 /services/QH65B2/
+#pragma mark - 完整 GSA SRP6a 握手 + 缓存 196字节 Xcode 令牌 + 请求 /services/QH65B2/
 
 - (void)loginWithAppleID:(NSString *)email
                 password:(NSString *)password
@@ -457,273 +463,283 @@ static const char *kRFC5054_2048_N_Hex =
         NSDictionary *anisette = [[AuraSignEngine sharedEngine] fetchNativeAnisetteHeaders];
         NSString *udid = [self realDeviceUDID];
 
-        if (twoFactorCode.length == 6 && _pending2FAAdsid.length && _pending2FAIdmsToken.length) {
-            BOOL codeValid = [self validate2FACodeWithAltSignEndpoint:twoFactorCode adsid:_pending2FAAdsid idmsToken:_pending2FAIdmsToken anisette:anisette];
-            if (!codeValid) {
+        NSString *adsid = nil;
+        NSString *xcodeToken = nil;
+
+        // 如果内存里刚刚已经成功兑换过该账号的 196 字节 Xcode 令牌，直接复用，无需重复跑 GSA 握手！
+        if ([_cachedEmail isEqualToString:username] && _cachedAdsid.length > 0 && _cachedXcodeToken.length > 0 && twoFactorCode.length == 0) {
+            adsid = _cachedAdsid;
+            xcodeToken = _cachedXcodeToken;
+            [[AuraSignEngine sharedEngine] appendTimelineLog:[NSString stringWithFormat:@"[GSA-CACHE] 直接复用已兑换成功的 196 字节 Xcode 令牌 (ADSID=%@)", adsid] success:YES];
+        } else {
+            if (twoFactorCode.length == 6 && _pending2FAAdsid.length && _pending2FAIdmsToken.length) {
+                BOOL codeValid = [self validate2FACodeWithAltSignEndpoint:twoFactorCode adsid:_pending2FAAdsid idmsToken:_pending2FAIdmsToken anisette:anisette];
+                if (!codeValid) {
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        if (completion) completion(NO, YES, @"6 位双重认证码校验未通过，请重新输入");
+                    });
+                    return;
+                }
+            }
+
+            NSDictionary *cpd = @{
+                @"bootstrap": @YES,
+                @"icscrec": @YES,
+                @"loc": @"zh_CN",
+                @"pbe": @NO,
+                @"prkgen": @YES,
+                @"svct": @"iCloud",
+                @"X-Apple-I-Client-Time": anisette[@"X-Apple-I-Client-Time"] ?: @"",
+                @"X-Apple-I-MD": anisette[@"X-Apple-I-MD"] ?: @"",
+                @"X-Apple-I-MD-M": anisette[@"X-Apple-I-MD-M"] ?: @"",
+                @"X-Apple-I-MD-RINFO": @([anisette[@"X-Apple-I-MD-RINFO"] longLongValue]),
+                @"X-Apple-I-TimeZone": anisette[@"X-Apple-I-TimeZone"] ?: @"CST",
+                @"X-Mme-Device-Id": udid ?: @""
+            };
+
+            BN_new_fn bn_new       = (BN_new_fn)dlsym(_cryptoHandle, "BN_new");
+            BN_free_fn bn_free     = (BN_free_fn)dlsym(_cryptoHandle, "BN_free");
+            BN_CTX_new_fn ctx_new  = (BN_CTX_new_fn)dlsym(_cryptoHandle, "BN_CTX_new");
+            BN_CTX_free_fn ctx_free= (BN_CTX_free_fn)dlsym(_cryptoHandle, "BN_CTX_free");
+            BN_bin2bn_fn bin2bn    = (BN_bin2bn_fn)dlsym(_cryptoHandle, "BN_bin2bn");
+            BN_set_word_fn set_w   = (BN_set_word_fn)dlsym(_cryptoHandle, "BN_set_word");
+            BN_add_fn bn_add       = (BN_add_fn)dlsym(_cryptoHandle, "BN_add");
+            BN_mul_fn bn_mul       = (BN_mul_fn)dlsym(_cryptoHandle, "BN_mul");
+            BN_mod_mul_fn mod_mul  = (BN_mod_mul_fn)dlsym(_cryptoHandle, "BN_mod_mul");
+            BN_mod_sub_fn mod_sub  = (BN_mod_sub_fn)dlsym(_cryptoHandle, "BN_mod_sub");
+            BN_mod_exp_fn mod_exp  = (BN_mod_exp_fn)dlsym(_cryptoHandle, "BN_mod_exp");
+
+            BN_CTX *bnCtx = ctx_new();
+            NSData *N_data = [self dataFromHexString:kRFC5054_2048_N_Hex];
+            BIGNUM *bn_N = bin2bn((const unsigned char *)N_data.bytes, (int)N_data.length, NULL);
+            BIGNUM *bn_g = bn_new();
+            set_w(bn_g, 2);
+
+            unsigned char a_bytes[32];
+            if (SecRandomCopyBytes(kSecRandomDefault, 32, a_bytes) != 0) {
+            arc4random_buf(a_bytes, 32);
+        }
+            BIGNUM *bn_a = bin2bn(a_bytes, 32, NULL);
+            BIGNUM *bn_A = bn_new();
+            mod_exp(bn_A, bn_g, bn_a, bn_N, bnCtx);
+            NSData *A_padded = [self bnToPaddedData:bn_A padLength:256];
+
+            [[AuraSignEngine sharedEngine] appendTimelineLog:[NSString stringWithFormat:@"[GSA-INIT] 正在通过 curl 向 gsa.apple.com 发起 SRP6a 握手 (%@)", username] success:YES];
+
+            NSDictionary *initResp = [self sendGSAServiceRequest:@{
+                @"A2k": A_padded,
+                @"cpd": cpd,
+                @"o": @"init",
+                @"ps": @[@"s2k", @"s2k_fo"],
+                @"u": username
+            }];
+
+            NSData *salt = initResp[@"s"];
+            NSData *B_data = initResp[@"B"];
+            NSInteger iterations = [initResp[@"i"] integerValue];
+            NSString *serverCookie = initResp[@"c"];
+            NSString *proto = initResp[@"sp"] ?: @"s2k";
+
+            if (!salt.length || !B_data.length || iterations <= 0) {
+                NSInteger ec = [initResp[@"Status"][@"ec"] integerValue];
+                NSString *em = initResp[@"Status"][@"em"] ?: @"GSA init 未返回盐值";
+                [[AuraSignEngine sharedEngine] appendTimelineLog:[NSString stringWithFormat:@"[GSA-INIT-ERR] ec=%ld, em=%@", (long)ec, em] success:NO];
+                bn_free(bn_N); bn_free(bn_g); bn_free(bn_a); bn_free(bn_A); ctx_free(bnCtx);
                 dispatch_async(dispatch_get_main_queue(), ^{
-                    if (completion) completion(NO, YES, @"6 位双重认证码校验未通过，请重新输入");
+                    if (completion) completion(NO, NO, [NSString stringWithFormat:@"苹果 GSA 握手失败 (%ld): %@", (long)ec, em]);
                 });
                 return;
             }
-        }
 
-        NSDictionary *cpd = @{
-            @"bootstrap": @YES,
-            @"icscrec": @YES,
-            @"loc": @"zh_CN",
-            @"pbe": @NO,
-            @"prkgen": @YES,
-            @"svct": @"iCloud",
-            @"X-Apple-I-Client-Time": anisette[@"X-Apple-I-Client-Time"] ?: @"",
-            @"X-Apple-I-MD": anisette[@"X-Apple-I-MD"] ?: @"",
-            @"X-Apple-I-MD-M": anisette[@"X-Apple-I-MD-M"] ?: @"",
-            @"X-Apple-I-MD-RINFO": @([anisette[@"X-Apple-I-MD-RINFO"] longLongValue]),
-            @"X-Apple-I-TimeZone": anisette[@"X-Apple-I-TimeZone"] ?: @"CST",
-            @"X-Mme-Device-Id": udid ?: @""
-        };
+            NSMutableData *gPadded = [NSMutableData dataWithLength:256];
+            ((unsigned char *)gPadded.mutableBytes)[255] = 0x02;
+            NSMutableData *kInput = [NSMutableData dataWithData:N_data];
+            [kInput appendData:gPadded];
+            NSData *kHash = [self sha256Data:kInput];
+            BIGNUM *bn_k = bin2bn((const unsigned char *)kHash.bytes, 32, NULL);
 
-        BN_new_fn bn_new       = (BN_new_fn)dlsym(_cryptoHandle, "BN_new");
-        BN_free_fn bn_free     = (BN_free_fn)dlsym(_cryptoHandle, "BN_free");
-        BN_CTX_new_fn ctx_new  = (BN_CTX_new_fn)dlsym(_cryptoHandle, "BN_CTX_new");
-        BN_CTX_free_fn ctx_free= (BN_CTX_free_fn)dlsym(_cryptoHandle, "BN_CTX_free");
-        BN_bin2bn_fn bin2bn    = (BN_bin2bn_fn)dlsym(_cryptoHandle, "BN_bin2bn");
-        BN_set_word_fn set_w   = (BN_set_word_fn)dlsym(_cryptoHandle, "BN_set_word");
-        BN_add_fn bn_add       = (BN_add_fn)dlsym(_cryptoHandle, "BN_add");
-        BN_mul_fn bn_mul       = (BN_mul_fn)dlsym(_cryptoHandle, "BN_mul");
-        BN_mod_mul_fn mod_mul  = (BN_mod_mul_fn)dlsym(_cryptoHandle, "BN_mod_mul");
-        BN_mod_sub_fn mod_sub  = (BN_mod_sub_fn)dlsym(_cryptoHandle, "BN_mod_sub");
-        BN_mod_exp_fn mod_exp  = (BN_mod_exp_fn)dlsym(_cryptoHandle, "BN_mod_exp");
+            BIGNUM *bn_B = bin2bn((const unsigned char *)B_data.bytes, (int)B_data.length, NULL);
+            NSData *B_padded = [self bnToPaddedData:bn_B padLength:256];
+            NSMutableData *uInput = [NSMutableData dataWithData:A_padded];
+            [uInput appendData:B_padded];
+            NSData *uHash = [self sha256Data:uInput];
+            BIGNUM *bn_u = bin2bn((const unsigned char *)uHash.bytes, 32, NULL);
 
-        BN_CTX *bnCtx = ctx_new();
-        NSData *N_data = [self dataFromHexString:kRFC5054_2048_N_Hex];
-        BIGNUM *bn_N = bin2bn((const unsigned char *)N_data.bytes, (int)N_data.length, NULL);
-        BIGNUM *bn_g = bn_new();
-        set_w(bn_g, 2);
-
-        unsigned char a_bytes[32];
-        if (SecRandomCopyBytes(kSecRandomDefault, 32, a_bytes) != 0) {
-            arc4random_buf(a_bytes, 32);
-        }
-        BIGNUM *bn_a = bin2bn(a_bytes, 32, NULL);
-        BIGNUM *bn_A = bn_new();
-        mod_exp(bn_A, bn_g, bn_a, bn_N, bnCtx);
-        NSData *A_padded = [self bnToPaddedData:bn_A padLength:256];
-
-        // ==================== GSA Step 1: init ====================
-        [[AuraSignEngine sharedEngine] appendTimelineLog:[NSString stringWithFormat:@"[GSA-INIT] 正在通过 curl 向 gsa.apple.com 发起 SRP6a 握手 (%@, 2FA=%@)",
-            username, twoFactorCode.length ? @"第2步验证通过后重连" : @"第1步"] success:YES];
-
-        NSDictionary *initResp = [self sendGSAServiceRequest:@{
-            @"A2k": A_padded,
-            @"cpd": cpd,
-            @"o": @"init",
-            @"ps": @[@"s2k", @"s2k_fo"],
-            @"u": username
-        }];
-
-        NSData *salt = initResp[@"s"];
-        NSData *B_data = initResp[@"B"];
-        NSInteger iterations = [initResp[@"i"] integerValue];
-        NSString *serverCookie = initResp[@"c"];
-        NSString *proto = initResp[@"sp"] ?: @"s2k";
-
-        if (!salt.length || !B_data.length || iterations <= 0) {
-            NSInteger ec = [initResp[@"Status"][@"ec"] integerValue];
-            NSString *em = initResp[@"Status"][@"em"] ?: @"GSA init 未返回盐值";
-            [[AuraSignEngine sharedEngine] appendTimelineLog:[NSString stringWithFormat:@"[GSA-INIT-ERR] ec=%ld, em=%@", (long)ec, em] success:NO];
-            bn_free(bn_N); bn_free(bn_g); bn_free(bn_a); bn_free(bn_A); ctx_free(bnCtx);
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (completion) completion(NO, NO, [NSString stringWithFormat:@"苹果 GSA 握手失败 (%ld): %@", (long)ec, em]);
-            });
-            return;
-        }
-
-        // ==================== GSA Step 2: complete ====================
-        NSMutableData *gPadded = [NSMutableData dataWithLength:256];
-        ((unsigned char *)gPadded.mutableBytes)[255] = 0x02;
-        NSMutableData *kInput = [NSMutableData dataWithData:N_data];
-        [kInput appendData:gPadded];
-        NSData *kHash = [self sha256Data:kInput];
-        BIGNUM *bn_k = bin2bn((const unsigned char *)kHash.bytes, 32, NULL);
-
-        BIGNUM *bn_B = bin2bn((const unsigned char *)B_data.bytes, (int)B_data.length, NULL);
-        NSData *B_padded = [self bnToPaddedData:bn_B padLength:256];
-        NSMutableData *uInput = [NSMutableData dataWithData:A_padded];
-        [uInput appendData:B_padded];
-        NSData *uHash = [self sha256Data:uInput];
-        BIGNUM *bn_u = bin2bn((const unsigned char *)uHash.bytes, 32, NULL);
-
-        NSData *passRawHash = [self sha256Data:[password dataUsingEncoding:NSUTF8StringEncoding]];
-        NSData *pbkdfPassInput = passRawHash;
-        if ([proto isEqualToString:@"s2k_fo"]) {
-            NSMutableString *hexPass = [NSMutableString stringWithCapacity:64];
-            const unsigned char *pBytes = (const unsigned char *)passRawHash.bytes;
-            for (int idx = 0; idx < 32; idx++) [hexPass appendFormat:@"%02x", pBytes[idx]];
-            pbkdfPassInput = [hexPass dataUsingEncoding:NSUTF8StringEncoding];
-        }
-        unsigned char pbkdfOut[32];
-        int pbkdfRet = CCKeyDerivationPBKDF(kCCPBKDF2, (const char *)pbkdfPassInput.bytes, pbkdfPassInput.length,
-                             (const uint8_t *)salt.bytes, salt.length,
-                             kCCPRFHmacAlgSHA256, (uint)iterations, pbkdfOut, 32);
-        (void)pbkdfRet;
-
-        NSMutableData *colonPass = [NSMutableData dataWithBytes:":" length:1];
-        [colonPass appendBytes:pbkdfOut length:32];
-        NSData *innerXHash = [self sha256Data:colonPass];
-
-        NSMutableData *xInput = [NSMutableData dataWithData:salt];
-        [xInput appendData:innerXHash];
-        NSData *xHash = [self sha256Data:xInput];
-        BIGNUM *bn_x = bin2bn((const unsigned char *)xHash.bytes, 32, NULL);
-
-        BIGNUM *bn_v = bn_new();
-        BIGNUM *bn_kv = bn_new();
-        BIGNUM *bn_base = bn_new();
-        BIGNUM *bn_ux = bn_new();
-        BIGNUM *bn_exp = bn_new();
-        BIGNUM *bn_S = bn_new();
-
-        mod_exp(bn_v, bn_g, bn_x, bn_N, bnCtx);
-        mod_mul(bn_kv, bn_k, bn_v, bn_N, bnCtx);
-        mod_sub(bn_base, bn_B, bn_kv, bn_N, bnCtx);
-        bn_mul(bn_ux, bn_u, bn_x, bnCtx);
-        bn_add(bn_exp, bn_a, bn_ux);
-        mod_exp(bn_S, bn_base, bn_exp, bn_N, bnCtx);
-
-        NSData *S_padded = [self bnToPaddedData:bn_S padLength:256];
-        NSData *K_data = [self sha256Data:S_padded];
-
-        NSData *HN = [self sha256Data:N_data];
-        NSData *Hg = [self sha256Data:gPadded];
-        unsigned char hXor[32];
-        for (int idx = 0; idx < 32; idx++) {
-            hXor[idx] = ((const unsigned char *)HN.bytes)[idx] ^ ((const unsigned char *)Hg.bytes)[idx];
-        }
-        NSData *HI = [self sha256Data:[username dataUsingEncoding:NSUTF8StringEncoding]];
-
-        NSMutableData *m1Input = [NSMutableData dataWithBytes:hXor length:32];
-        [m1Input appendData:HI];
-        [m1Input appendData:salt];
-        [m1Input appendData:A_padded];
-        [m1Input appendData:B_padded];
-        [m1Input appendData:K_data];
-        NSData *M1_data = [self sha256Data:m1Input];
-
-        bn_free(bn_N); bn_free(bn_g); bn_free(bn_a); bn_free(bn_A);
-        bn_free(bn_k); bn_free(bn_B); bn_free(bn_u); bn_free(bn_x);
-        bn_free(bn_v); bn_free(bn_kv); bn_free(bn_base); bn_free(bn_ux);
-        bn_free(bn_exp); bn_free(bn_S); ctx_free(bnCtx);
-
-        NSDictionary *compResp = [self sendGSAServiceRequest:@{
-            @"M1": M1_data,
-            @"c": serverCookie ?: @"",
-            @"cpd": cpd,
-            @"o": @"complete",
-            @"u": username
-        }];
-
-        NSInteger ec = [compResp[@"Status"][@"ec"] integerValue];
-        NSString *em = compResp[@"Status"][@"em"] ?: @"";
-        NSString *authType = compResp[@"Status"][@"au"] ?: @"";
-        NSData *spdData = compResp[@"spd"];
-
-        [[AuraSignEngine sharedEngine] appendTimelineLog:[NSString stringWithFormat:@"[GSA-COMPLETE] proto=%@, ec=%ld, au=%@, spdLen=%lu, em=%@",
-            proto, (long)ec, authType, (unsigned long)spdData.length, em] success:(ec == 0 || spdData.length > 0)];
-
-        if (ec == -22406) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (completion) completion(NO, NO, @"Apple ID 账号或密码不正确 (-22406)，请重新核对密码");
-            });
-            return;
-        }
-
-        NSDictionary *spdDict = nil;
-        if ([spdData isKindOfClass:[NSData class]] && spdData.length > 16) {
-            NSData *extraKey = [self hmacSHA256WithKey:K_data data:[@"extra data key:" dataUsingEncoding:NSUTF8StringEncoding]];
-            NSData *extraIVFull = [self hmacSHA256WithKey:K_data data:[@"extra data iv:" dataUsingEncoding:NSUTF8StringEncoding]];
-            NSData *extraIV = [extraIVFull subdataWithRange:NSMakeRange(0, 16)];
-            NSData *decSpd = [self aes256CBCDecryptData:spdData key:extraKey iv:extraIV];
-            if (decSpd.length) {
-                spdDict = [NSPropertyListSerialization propertyListWithData:decSpd options:0 format:NULL error:NULL];
+            NSData *passRawHash = [self sha256Data:[password dataUsingEncoding:NSUTF8StringEncoding]];
+            NSData *pbkdfPassInput = passRawHash;
+            if ([proto isEqualToString:@"s2k_fo"]) {
+                NSMutableString *hexPass = [NSMutableString stringWithCapacity:64];
+                const unsigned char *pBytes = (const unsigned char *)passRawHash.bytes;
+                for (int idx = 0; idx < 32; idx++) [hexPass appendFormat:@"%02x", pBytes[idx]];
+                pbkdfPassInput = [hexPass dataUsingEncoding:NSUTF8StringEncoding];
             }
-        }
+            unsigned char pbkdfOut[32];
+            int pbkdfRet = CCKeyDerivationPBKDF(kCCPBKDF2, (const char *)pbkdfPassInput.bytes, pbkdfPassInput.length,
+                                 (const uint8_t *)salt.bytes, salt.length,
+                                 kCCPRFHmacAlgSHA256, (uint)iterations, pbkdfOut, 32);
+            (void)pbkdfRet;
 
-        NSString *adsid = spdDict[@"adsid"] ?: @"";
-        NSString *idmsToken = spdDict[@"GsIdmsToken"] ?: @"";
-        NSData *skData = spdDict[@"sk"];
-        NSData *spdCookie = spdDict[@"c"];
+            NSMutableData *colonPass = [NSMutableData dataWithBytes:":" length:1];
+            [colonPass appendBytes:pbkdfOut length:32];
+            NSData *innerXHash = [self sha256Data:colonPass];
 
-        [[AuraSignEngine sharedEngine] appendTimelineLog:[NSString stringWithFormat:@"[GSA-SPD-DEC] 解密 spd: adsid=%@, idmsLen=%lu, skLen=%lu",
-            adsid.length ? adsid : @"空", (unsigned long)idmsToken.length, (unsigned long)skData.length] success:(adsid.length > 0)];
+            NSMutableData *xInput = [NSMutableData dataWithData:salt];
+            [xInput appendData:innerXHash];
+            NSData *xHash = [self sha256Data:xInput];
+            BIGNUM *bn_x = bin2bn((const unsigned char *)xHash.bytes, 32, NULL);
 
-        if (adsid.length && idmsToken.length) {
-            _pending2FAAdsid = adsid;
-            _pending2FAIdmsToken = idmsToken;
-        }
+            BIGNUM *bn_v = bn_new();
+            BIGNUM *bn_kv = bn_new();
+            BIGNUM *bn_base = bn_new();
+            BIGNUM *bn_ux = bn_new();
+            BIGNUM *bn_exp = bn_new();
+            BIGNUM *bn_S = bn_new();
 
-        if (([authType containsString:@"SecondaryAuth"] || [authType containsString:@"secondaryAuth"] || ec == -22411) && twoFactorCode.length == 0) {
+            mod_exp(bn_v, bn_g, bn_x, bn_N, bnCtx);
+            mod_mul(bn_kv, bn_k, bn_v, bn_N, bnCtx);
+            mod_sub(bn_base, bn_B, bn_kv, bn_N, bnCtx);
+            bn_mul(bn_ux, bn_u, bn_x, bnCtx);
+            bn_add(bn_exp, bn_a, bn_ux);
+            mod_exp(bn_S, bn_base, bn_exp, bn_N, bnCtx);
+
+            NSData *S_padded = [self bnToPaddedData:bn_S padLength:256];
+            NSData *K_data = [self sha256Data:S_padded];
+
+            NSData *HN = [self sha256Data:N_data];
+            NSData *Hg = [self sha256Data:gPadded];
+            unsigned char hXor[32];
+            for (int idx = 0; idx < 32; idx++) {
+                hXor[idx] = ((const unsigned char *)HN.bytes)[idx] ^ ((const unsigned char *)Hg.bytes)[idx];
+            }
+            NSData *HI = [self sha256Data:[username dataUsingEncoding:NSUTF8StringEncoding]];
+
+            NSMutableData *m1Input = [NSMutableData dataWithBytes:hXor length:32];
+            [m1Input appendData:HI];
+            [m1Input appendData:salt];
+            [m1Input appendData:A_padded];
+            [m1Input appendData:B_padded];
+            [m1Input appendData:K_data];
+            NSData *M1_data = [self sha256Data:m1Input];
+
+            bn_free(bn_N); bn_free(bn_g); bn_free(bn_a); bn_free(bn_A);
+            bn_free(bn_k); bn_free(bn_B); bn_free(bn_u); bn_free(bn_x);
+            bn_free(bn_v); bn_free(bn_kv); bn_free(bn_base); bn_free(bn_ux);
+            bn_free(bn_exp); bn_free(bn_S); ctx_free(bnCtx);
+
+            NSDictionary *compResp = [self sendGSAServiceRequest:@{
+                @"M1": M1_data,
+                @"c": serverCookie ?: @"",
+                @"cpd": cpd,
+                @"o": @"complete",
+                @"u": username
+            }];
+
+            NSInteger ec = [compResp[@"Status"][@"ec"] integerValue];
+            NSString *em = compResp[@"Status"][@"em"] ?: @"";
+            NSString *authType = compResp[@"Status"][@"au"] ?: @"";
+            NSData *spdData = compResp[@"spd"];
+
+            [[AuraSignEngine sharedEngine] appendTimelineLog:[NSString stringWithFormat:@"[GSA-COMPLETE] proto=%@, ec=%ld, au=%@, spdLen=%lu, em=%@",
+                proto, (long)ec, authType, (unsigned long)spdData.length, em] success:(ec == 0 || spdData.length > 0)];
+
+            if (ec == -22406) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    if (completion) completion(NO, NO, @"Apple ID 账号或密码不正确 (-22406)，请重新核对密码");
+                });
+                return;
+            }
+
+            NSDictionary *spdDict = nil;
+            if ([spdData isKindOfClass:[NSData class]] && spdData.length > 16) {
+                NSData *extraKey = [self hmacSHA256WithKey:K_data data:[@"extra data key:" dataUsingEncoding:NSUTF8StringEncoding]];
+                NSData *extraIVFull = [self hmacSHA256WithKey:K_data data:[@"extra data iv:" dataUsingEncoding:NSUTF8StringEncoding]];
+                NSData *extraIV = [extraIVFull subdataWithRange:NSMakeRange(0, 16)];
+                NSData *decSpd = [self aes256CBCDecryptData:spdData key:extraKey iv:extraIV];
+                if (decSpd.length) {
+                    spdDict = [NSPropertyListSerialization propertyListWithData:decSpd options:0 format:NULL error:NULL];
+                }
+            }
+
+            adsid = spdDict[@"adsid"] ?: @"";
+            NSString *idmsToken = spdDict[@"GsIdmsToken"] ?: @"";
+            NSData *skData = spdDict[@"sk"];
+            NSData *spdCookie = spdDict[@"c"];
+
+            [[AuraSignEngine sharedEngine] appendTimelineLog:[NSString stringWithFormat:@"[GSA-SPD-DEC] 解密 spd: adsid=%@, idmsLen=%lu, skLen=%lu",
+                adsid.length ? adsid : @"空", (unsigned long)idmsToken.length, (unsigned long)skData.length] success:(adsid.length > 0)];
+
             if (adsid.length && idmsToken.length) {
-                [self triggerTrustedDevice2FAPushWithADSID:adsid idmsToken:idmsToken anisette:anisette];
+                _pending2FAAdsid = adsid;
+                _pending2FAIdmsToken = idmsToken;
             }
-            [[AuraSignEngine sharedEngine] appendTimelineLog:@"[GSA-2FA] 已触发苹果向本机推送 6 位验证码弹窗，等待输入" success:YES];
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (completion) completion(NO, YES, @"验证码已推送至您的手机屏幕，请输入收到的 6 位数字验证码");
-            });
-            return;
-        }
 
-        if (!adsid.length || !idmsToken.length || ![skData isKindOfClass:[NSData class]]) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (completion) completion(NO, (twoFactorCode.length == 0), [NSString stringWithFormat:@"双重认证未完成 (%ld: %@)", (long)ec, em]);
-            });
-            return;
-        }
-
-        // ==================== GSA Step 3: 发送 apptokens 兑换 com.apple.gs.xcode.auth ====================
-        NSString *appName = @"com.apple.gs.xcode.auth";
-        NSMutableData *chkInput = [NSMutableData dataWithData:[@"apptokens" dataUsingEncoding:NSUTF8StringEncoding]];
-        [chkInput appendData:[adsid dataUsingEncoding:NSUTF8StringEncoding]];
-        [chkInput appendData:[appName dataUsingEncoding:NSUTF8StringEncoding]];
-        NSData *checksum = [self hmacSHA256WithKey:skData data:chkInput];
-
-        NSDictionary *appTokResp = [self sendGSAServiceRequest:@{
-            @"app": @[appName],
-            @"c": spdCookie ?: [NSData data],
-            @"checksum": checksum,
-            @"cpd": cpd,
-            @"o": @"apptokens",
-            @"t": idmsToken,
-            @"u": adsid
-        }];
-
-        NSInteger appTokEc = [appTokResp[@"Status"][@"ec"] integerValue];
-        NSString *appTokEm = appTokResp[@"Status"][@"em"] ?: @"";
-        NSData *etData = appTokResp[@"et"];
-
-        [[AuraSignEngine sharedEngine] appendTimelineLog:[NSString stringWithFormat:@"[GSA-APPTOKENS] ec=%ld, em=%@, etLen=%lu",
-            (long)appTokEc, appTokEm, (unsigned long)etData.length] success:(etData.length > 0)];
-
-        NSString *xcodeToken = nil;
-        if ([etData isKindOfClass:[NSData class]] && etData.length > 35) {
-            NSData *decEt = [self aes256GCMDecryptETData:etData key:skData];
-            if (decEt.length) {
-                NSDictionary *etDict = [NSPropertyListSerialization propertyListWithData:decEt options:0 format:NULL error:NULL];
-                xcodeToken = etDict[@"t"][@"com.apple.gs.xcode.auth"][@"token"];
+            if (([authType containsString:@"SecondaryAuth"] || [authType containsString:@"secondaryAuth"] || ec == -22411) && twoFactorCode.length == 0) {
+                if (adsid.length && idmsToken.length) {
+                    [self triggerTrustedDevice2FAPushWithADSID:adsid idmsToken:idmsToken anisette:anisette];
+                }
+                [[AuraSignEngine sharedEngine] appendTimelineLog:@"[GSA-2FA] 已触发苹果向本机推送 6 位验证码弹窗，等待输入" success:YES];
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    if (completion) completion(NO, YES, @"验证码已推送至您的手机屏幕，请输入收到的 6 位数字验证码");
+                });
+                return;
             }
-        }
 
-        if (!xcodeToken.length && [spdDict[@"t"] isKindOfClass:[NSDictionary class]]) {
-            xcodeToken = spdDict[@"t"][@"com.apple.gs.xcode.auth"][@"token"];
-        }
+            if (!adsid.length || !idmsToken.length || ![skData isKindOfClass:[NSData class]]) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    if (completion) completion(NO, (twoFactorCode.length == 0), [NSString stringWithFormat:@"双重认证未完成 (%ld: %@)", (long)ec, em]);
+                });
+                return;
+            }
 
-        [[AuraSignEngine sharedEngine] appendTimelineLog:[NSString stringWithFormat:@"[GSA-XCODE-TOKEN] 兑换 com.apple.gs.xcode.auth 令牌结果: 长度=%lu",
-            (unsigned long)xcodeToken.length] success:(xcodeToken.length > 0)];
+            NSString *appName = @"com.apple.gs.xcode.auth";
+            NSMutableData *chkInput = [NSMutableData dataWithData:[@"apptokens" dataUsingEncoding:NSUTF8StringEncoding]];
+            [chkInput appendData:[adsid dataUsingEncoding:NSUTF8StringEncoding]];
+            [chkInput appendData:[appName dataUsingEncoding:NSUTF8StringEncoding]];
+            NSData *checksum = [self hmacSHA256WithKey:skData data:chkInput];
 
-        if (!xcodeToken.length) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (completion) completion(NO, NO, [NSString stringWithFormat:@"兑换 Xcode 令牌失败 (%ld: %@)，请复制诊断日志", (long)appTokEc, appTokEm]);
-            });
-            return;
+            NSDictionary *appTokResp = [self sendGSAServiceRequest:@{
+                @"app": @[appName],
+                @"c": spdCookie ?: [NSData data],
+                @"checksum": checksum,
+                @"cpd": cpd,
+                @"o": @"apptokens",
+                @"t": idmsToken,
+                @"u": adsid
+            }];
+
+            NSInteger appTokEc = [appTokResp[@"Status"][@"ec"] integerValue];
+            NSString *appTokEm = appTokResp[@"Status"][@"em"] ?: @"";
+            NSData *etData = appTokResp[@"et"];
+
+            [[AuraSignEngine sharedEngine] appendTimelineLog:[NSString stringWithFormat:@"[GSA-APPTOKENS] ec=%ld, em=%@, etLen=%lu",
+                (long)appTokEc, appTokEm, (unsigned long)etData.length] success:(etData.length > 0)];
+
+            if ([etData isKindOfClass:[NSData class]] && etData.length > 35) {
+                NSData *decEt = [self aes256GCMDecryptETData:etData key:skData];
+                if (decEt.length) {
+                    NSDictionary *etDict = [NSPropertyListSerialization propertyListWithData:decEt options:0 format:NULL error:NULL];
+                    xcodeToken = etDict[@"t"][@"com.apple.gs.xcode.auth"][@"token"];
+                }
+            }
+
+            if (!xcodeToken.length && [spdDict[@"t"] isKindOfClass:[NSDictionary class]]) {
+                xcodeToken = spdDict[@"t"][@"com.apple.gs.xcode.auth"][@"token"];
+            }
+
+            [[AuraSignEngine sharedEngine] appendTimelineLog:[NSString stringWithFormat:@"[GSA-XCODE-TOKEN] 兑换 com.apple.gs.xcode.auth 令牌结果: 长度=%lu",
+                (unsigned long)xcodeToken.length] success:(xcodeToken.length > 0)];
+
+            if (!xcodeToken.length) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    if (completion) completion(NO, NO, [NSString stringWithFormat:@"兑换 Xcode 令牌失败 (%ld: %@)，请稍后几秒重试", (long)appTokEc, appTokEm]);
+                });
+                return;
+            }
+
+            // 缓存这枚宝贵的 196 字节 Xcode 令牌！
+            _cachedEmail = username;
+            _cachedAdsid = adsid;
+            _cachedXcodeToken = xcodeToken;
         }
 
         // ==================== Step 4: 用真正的 com.apple.gs.xcode.auth 令牌请求 /services/QH65B2/ ====================
@@ -736,12 +752,11 @@ static const char *kRFC5054_2048_N_Hex =
         }];
 
         NSError *stepErr = nil;
-        // 【关键修复】：listTeams.action 位于 /services/QH65B2/listTeams.action，其余操作位于 /services/QH65B2/ios/...
         NSDictionary *teamsResp = [self sendQH65B2Request:@"listTeams.action" bodyDict:@{} session:sess outError:&stepErr];
         NSArray *teams = teamsResp[@"teams"];
         if (![teams isKindOfClass:[NSArray class]] || teams.count == 0) {
             dispatch_async(dispatch_get_main_queue(), ^{
-                if (completion) completion(NO, NO, stepErr.localizedDescription ?: @"未能获取个人开发者 TeamID");
+                if (completion) completion(NO, NO, stepErr.localizedDescription ?: @"获取个人开发者 TeamID 失败，请复制日志查看详情");
             });
             return;
         }
@@ -804,7 +819,7 @@ static const char *kRFC5054_2048_N_Hex =
     });
 }
 
-#pragma mark - OpenSSL 证书合成、/services/QH65B2/ 请求、AppID注册与 zsign 签名
+#pragma mark - OpenSSL 证书合成、/services/QH65B2/ 请求 (带 503 自动重试与非空字典校验)
 
 - (NSString *)generatePrivateKeyAndCSRPEMForEmail:(NSString *)email {
     NSString *keyPath = [[self keychainDir] stringByAppendingPathComponent:@"dev_key.pem"];
@@ -842,7 +857,6 @@ static const char *kRFC5054_2048_N_Hex =
     return (r1 == 0 && r2 == 0 && [[NSFileManager defaultManager] fileExistsAtPath:p12Path]);
 }
 
-// 【关键修复】：严格对齐 AltSign 的 /services/QH65B2/ 根路径与 X-Apple-App-Info 请求头！
 - (NSDictionary *)sendQH65B2Request:(NSString *)actionPath
                            bodyDict:(NSDictionary *)bodyDict
                             session:(NSDictionary *)session
@@ -857,8 +871,9 @@ static const char *kRFC5054_2048_N_Hex =
     if ([session[@"adsid"] length]) headers[@"X-Apple-I-Identity-Id"] = session[@"adsid"];
     if ([session[@"xcodeToken"] length]) headers[@"X-Apple-GS-Token"] = session[@"xcodeToken"];
     headers[@"X-Apple-App-Info"] = @"com.apple.gs.xcode.auth";
-    headers[@"User-Agent"] = @"Xcode";
-    headers[@"X-Xcode-Version"] = @"11.2 (11B41)";
+    // 采用 AltSign#47 新版 User-Agent，彻底防止苹果网关返回 503 HTML！
+    headers[@"User-Agent"] = @"AuthKit/1 (com.apple.dt.Xcode/3594.4.1)";
+    headers[@"X-Xcode-Version"] = @"15.2 (15C500b)";
     headers[@"X-MMe-Client-Info"] = @"<Mac15,7> <macOS;27.0;26A5378j> <com.apple.AuthKit/1 (com.apple.akd/1.0)>";
     headers[@"Content-Type"] = @"text/x-xml-plist";
     headers[@"Accept"] = @"text/x-xml-plist";
@@ -874,20 +889,38 @@ static const char *kRFC5054_2048_N_Hex =
     NSData *xmlBodyData = [NSPropertyListSerialization dataWithPropertyList:fullBody format:NSPropertyListXMLFormat_v1_0 options:0 error:NULL];
 
     int curlExit = 0;
-    NSData *respData = [self executeCurlRequestWithURL:urlStr method:@"POST" headers:headers bodyData:xmlBodyData outExitCode:&curlExit];
-    if (curlExit != 0 || !respData.length) {
+    NSData *respData = nil;
+    NSDictionary *respDict = nil;
+
+    // 同样加入 4 次自动重试，若偶遇 503 HTML 自动等待 1.2 秒重试！
+    for (int attempt = 1; attempt <= 4; attempt++) {
+        respData = [self executeCurlRequestWithURL:urlStr method:@"POST" headers:headers bodyData:xmlBodyData outExitCode:&curlExit];
+        if (respData.length > 0) {
+            id obj = [NSPropertyListSerialization propertyListWithData:respData options:0 format:NULL error:NULL];
+            if ([obj isKindOfClass:[NSDictionary class]]) {
+                respDict = (NSDictionary *)obj;
+                break;
+            }
+        }
+        [NSThread sleepForTimeInterval:1.2];
+    }
+
+    if (!respDict) {
+        NSString *rawStr = [[NSString alloc] initWithData:respData encoding:NSUTF8StringEncoding] ?: @"empty";
+        if (rawStr.length > 100) rawStr = [rawStr substringToIndex:100];
+        [[AuraSignEngine sharedEngine] appendTimelineLog:[NSString stringWithFormat:@"[QH65B2-HTML-ERR] %@ 未返回 Plist! exit=%d, raw=%@", actionPath, curlExit, rawStr] success:NO];
         if (outError) {
-            *outError = [NSError errorWithDomain:@"AuraSign" code:curlExit userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"curl 请求失败 (exit=%d)", curlExit]}];
+            *outError = [NSError errorWithDomain:@"AuraSign" code:503 userInfo:@{NSLocalizedDescriptionKey: @"苹果开发者中心服务器繁忙 (503)，已为您缓存令牌，请再点一次重试"}];
         }
         return nil;
     }
 
-    NSDictionary *respDict = [NSPropertyListSerialization propertyListWithData:respData options:0 format:NULL error:NULL];
     NSInteger resultCode = [respDict[@"resultCode"] integerValue];
     NSString *rawResultStr = respDict[@"resultString"] ?: @"";
     NSString *rawUserStr   = respDict[@"userString"] ?: @"";
-    [[AuraSignEngine sharedEngine] appendTimelineLog:[NSString stringWithFormat:@"[QH65B2-RESP] %@ | resultCode=%ld | msg=%@",
-        actionPath, (long)resultCode, rawUserStr.length ? rawUserStr : rawResultStr] success:(resultCode == 0)];
+    NSArray *teamsArr      = [respDict[@"teams"] isKindOfClass:[NSArray class]] ? respDict[@"teams"] : nil;
+    [[AuraSignEngine sharedEngine] appendTimelineLog:[NSString stringWithFormat:@"[QH65B2-RESP] %@ | resultCode=%ld | keys=%@ | teamsCount=%lu | msg=%@",
+        actionPath, (long)resultCode, [respDict.allKeys componentsJoinedByString:@","], (unsigned long)teamsArr.count, rawUserStr.length ? rawUserStr : rawResultStr] success:(resultCode == 0)];
 
     if (resultCode != 0 && outError) {
         NSString *appleMsg = rawUserStr.length ? rawUserStr : (rawResultStr.length ? rawResultStr : @"未知苹果接口错误");
