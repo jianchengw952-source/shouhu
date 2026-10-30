@@ -47,6 +47,14 @@ typedef NS_ENUM(NSInteger, AuraShieldStatus) {
 - (void)requestSystemNotificationPermission;
 - (void)sendSystemNotificationWithTitle:(NSString *)title body:(NSString *)body;
 
+// 读取简单易懂的白话文日志列表 (每个元素包含 time, title, detail, success)
+- (NSArray<NSDictionary *> *)readSimpleUserLogs;
+- (void)appendSimpleUserLogWithTitle:(NSString *)title detail:(NSString *)detail success:(BOOL)success;
+- (void)clearAllLogs;
+
+// 进程互斥锁，防止手动单点签名时后台 aurasignd 同时运行
+- (BOOL)isSigningLockActive;
+
 - (NSArray<AuraAppInfo *> *)scanTargetApps;
 - (AuraShieldStatus)evaluateGlobalShieldStatus:(NSString **)outSummary;
 - (BOOL)verifyUnjailbrokenBootability:(NSString *)bundlePath;

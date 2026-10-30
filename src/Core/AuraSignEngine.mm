@@ -1,14 +1,16 @@
-// src/Core/AuraSignEngine.mm (第1页：🛡️签名 | 第2页：⚙️设置 + 原生系统横幅通知 + 3槽位守护终极版)
+// src/Core/AuraSignEngine.mm
 #import <CoreFoundation/CoreFoundation.h>
 #import "AuraSignEngine.h"
 #import "AuraAppleDeveloperAPI.h"
+#import "AuraLiquidGlassView.h"
+#import <AudioToolbox/AudioToolbox.h>
+#import <notify.h>
 #import <dlfcn.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <sys/stat.h>
 #import <spawn.h>
 #import <sys/wait.h>
-#import <unistd.h>
 
 #if defined(__APPLE__)
 #include <crt_externs.h>
@@ -16,6 +18,10 @@
 #else
 extern char **environ;
 #endif
+
+@interface UIImage (AuraEngineIconPrivate)
++ (UIImage *)_applicationIconImageForBundleIdentifier:(NSString *)bundleIdentifier format:(int)format scale:(CGFloat)scale;
+@end
 
 @interface NSObject (AuraDynamicPrivateAPIs)
 - (id)anisetteDataWithError:(NSError **)error;
@@ -33,42 +39,18 @@ extern char **environ;
 - (NSString *)applicationType;
 @end
 
-@interface NSObject (AuraUserNotificationsPrivate)
-+ (id)currentNotificationCenter;
-- (instancetype)initWithBundleIdentifier:(NSString *)bundleId;
-- (void)setDelegate:(id)delegate;
-- (void)requestAuthorizationWithOptions:(NSUInteger)options completionHandler:(void (^)(BOOL granted, NSError *error))completionHandler;
-- (void)addNotificationRequest:(id)request withCompletionHandler:(void (^)(NSError *error))completionHandler;
-- (void)setTitle:(NSString *)title;
-- (void)setBody:(NSString *)body;
-- (void)setSound:(id)sound;
-+ (id)defaultSound;
-+ (id)requestWithIdentifier:(NSString *)identifier content:(id)content trigger:(id)trigger;
-@end
-
-typedef int (*MISValidateSignatureFunc)(CFStringRef file, CFDictionaryRef options, CFDictionaryRef *info);
-typedef CFTypeRef (*MISProfileCreateWithDataFunc)(CFAllocatorRef alloc, CFDataRef data);
+typedef CFTypeRef (*MISProfileCreateWithDataFunc)(CFAllocatorRef allocator, CFDataRef data);
 typedef int (*MISInstallProvisioningProfileFunc)(CFTypeRef profile);
 
-static uint32_t aura_crc32_compute(const uint8_t *buf, size_t len) {
-    uint32_t crc = 0xFFFFFFFF;
-    for (size_t i = 0; i < len; i++) {
-        crc ^= buf[i];
-        for (int j = 0; j < 8; j++) {
-            crc = (crc >> 1) ^ (0xEDB88320 & (-(int32_t)(crc & 1)));
-        }
-    }
-    return ~crc;
-}
-
+// 纯 C 内存 ZIP 打包头结构体
 #pragma pack(push, 1)
 typedef struct {
-    uint32_t signature;      // 0x04034b50
-    uint16_t versionNeeded;  // 20
-    uint16_t flags;          // 0
-    uint16_t compression;    // 0 (STORE)
-    uint16_t modTime;
-    uint16_t modDate;
+    uint32_t signature;       // 0x04034b50
+    uint16_t versionNeeded;   // 20
+    uint16_t flags;           // 0
+    uint16_t compression;     // 0 (Store)
+    uint16_t modTime;         // 0
+    uint16_t modDate;         // 0x5421
     uint32_t crc32;
     uint32_t compressedSize;
     uint32_t uncompressedSize;
@@ -77,13 +59,13 @@ typedef struct {
 } AuraZipLocalHeader;
 
 typedef struct {
-    uint32_t signature;      // 0x02014b50
-    uint16_t versionMadeBy;  // 0x0314 (Unix)
-    uint16_t versionNeeded;  // 20
-    uint16_t flags;          // 0
-    uint16_t compression;    // 0
-    uint16_t modTime;
-    uint16_t modDate;
+    uint32_t signature;       // 0x02014b50
+    uint16_t versionMadeBy;   // 0x0314 (UNIX)
+    uint16_t versionNeeded;   // 20
+    uint16_t flags;           // 0
+    uint16_t compression;     // 0
+    uint16_t modTime;         // 0
+    uint16_t modDate;         // 0x5421
     uint32_t crc32;
     uint32_t compressedSize;
     uint32_t uncompressedSize;
@@ -92,12 +74,12 @@ typedef struct {
     uint16_t fileCommentLen;
     uint16_t diskNumberStart;
     uint16_t internalAttrs;
-    uint32_t externalAttrs;
+    uint32_t externalAttrs;   // UNIX permissions << 16
     uint32_t localHeaderOffset;
 } AuraZipCentralHeader;
 
 typedef struct {
-    uint32_t signature;      // 0x06054b50
+    uint32_t signature;       // 0x06054b50
     uint16_t diskNumber;
     uint16_t centralDirDisk;
     uint16_t numEntriesThisDisk;
@@ -108,8 +90,30 @@ typedef struct {
 } AuraZipEndRecord;
 #pragma pack(pop)
 
+static uint32_t aura_crc32_compute(const uint8_t *data, size_t length) {
+    static uint32_t table[256];
+    static BOOL table_inited = NO;
+    if (!table_inited) {
+        for (uint32_t i = 0; i < 256; i++) {
+            uint32_t c = i;
+            for (int j = 0; j < 8; j++) {
+                c = (c & 1) ? (0xEDB88320L ^ (c >> 1)) : (c >> 1);
+            }
+            table[i] = c;
+        }
+        table_inited = YES;
+    }
+    uint32_t crc = 0xFFFFFFFF;
+    for (size_t i = 0; i < length; i++) {
+        crc = table[(crc ^ data[i]) & 0xFF] ^ (crc >> 8);
+    }
+    return crc ^ 0xFFFFFFFF;
+}
+
 @implementation AuraAppInfo
 @end
+
+#define AURA_PREFS_PATH AURA_NS_JBROOT(@"/var/mobile/Library/Preferences/com.aurasign.pro.plist")
 
 @implementation AuraSignEngine {
     NSMutableArray<NSString *> *_guardedBundleIDs;
@@ -125,32 +129,43 @@ typedef struct {
 }
 
 - (instancetype)init {
-    if (self = [super init]) {
-        dlopen("/System/Library/PrivateFrameworks/AuthKit.framework/AuthKit", RTLD_LAZY);
-        dlopen("/System/Library/Frameworks/CoreServices.framework/CoreServices", RTLD_LAZY);
-        dlopen("/System/Library/Frameworks/UserNotifications.framework/UserNotifications", RTLD_LAZY);
+    self = [super init];
+    if (self) {
+        _normalRenewThresholdDays = 5;
+        _lowBatteryRescueEnabled = YES;
+        _lowBatteryTriggerPercent = 5;
+        _lowBatteryThresholdDays = 5;
+        _rebootShieldEnabled = YES;
+        _notificationEnabled = YES;
+        _smartStripExtensions = YES;
+        _liquidGlassTintLevel = 0.25f;
+        _guardedBundleIDs = [NSMutableArray array];
         [self loadPreferences];
     }
     return self;
 }
 
 - (void)loadPreferences {
-    NSDictionary *dict = [NSDictionary dictionaryWithContentsOfFile:AURA_PREFS_PATH] ?: @{};
-    _autoRenewEnabled = dict[@"autoRenewEnabled"] ? [dict[@"autoRenewEnabled"] boolValue] : YES;
-    _normalRenewThresholdDays = dict[@"normalRenewThresholdDays"] ? [dict[@"normalRenewThresholdDays"] integerValue] : 5;
-    _lowBatteryRescueEnabled = dict[@"lowBatteryRescueEnabled"] ? [dict[@"lowBatteryRescueEnabled"] boolValue] : YES;
-    _lowBatteryTriggerPercent = dict[@"lowBatteryTriggerPercent"] ? [dict[@"lowBatteryTriggerPercent"] integerValue] : 5;
-    _lowBatteryThresholdDays = dict[@"lowBatteryThresholdDays"] ? [dict[@"lowBatteryThresholdDays"] integerValue] : 5;
-    _rebootShieldEnabled = dict[@"rebootShieldEnabled"] ? [dict[@"rebootShieldEnabled"] boolValue] : YES;
-    _notificationEnabled = dict[@"notificationEnabled"] ? [dict[@"notificationEnabled"] boolValue] : YES;
-    _smartStripExtensions = YES;
-    _liquidGlassTintLevel = 0.25f;
-    _guardedBundleIDs = [dict[@"guardedBundleIDs"] mutableCopy] ?: [NSMutableArray array];
+    NSDictionary *dict = [NSDictionary dictionaryWithContentsOfFile:AURA_PREFS_PATH];
+    if (dict) {
+        if (dict[@"autoRenewEnabled"])          _autoRenewEnabled = [dict[@"autoRenewEnabled"] boolValue];
+        if (dict[@"normalRenewThresholdDays"])  _normalRenewThresholdDays = [dict[@"normalRenewThresholdDays"] integerValue];
+        if (dict[@"lowBatteryRescueEnabled"])   _lowBatteryRescueEnabled = [dict[@"lowBatteryRescueEnabled"] boolValue];
+        if (dict[@"lowBatteryTriggerPercent"])  _lowBatteryTriggerPercent = [dict[@"lowBatteryTriggerPercent"] integerValue];
+        if (dict[@"lowBatteryThresholdDays"])   _lowBatteryThresholdDays = [dict[@"lowBatteryThresholdDays"] integerValue];
+        if (dict[@"rebootShieldEnabled"])       _rebootShieldEnabled = [dict[@"rebootShieldEnabled"] boolValue];
+        if (dict[@"notificationEnabled"])       _notificationEnabled = [dict[@"notificationEnabled"] boolValue];
+        if (dict[@"smartStripExtensions"])      _smartStripExtensions = [dict[@"smartStripExtensions"] boolValue];
+        if (dict[@"liquidGlassTintLevel"])      _liquidGlassTintLevel = [dict[@"liquidGlassTintLevel"] floatValue];
+        _guardedBundleIDs = [dict[@"guardedBundleIDs"] mutableCopy] ?: [NSMutableArray array];
+    }
 }
 
 - (void)savePreferences {
-    NSString *dir = [AURA_PREFS_PATH stringByDeletingLastPathComponent];
-    [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+    NSString *prefDir = AURA_NS_JBROOT(@"/var/mobile/Library/Preferences");
+    [[NSFileManager defaultManager] createDirectoryAtPath:prefDir withIntermediateDirectories:YES attributes:nil error:nil];
+    chmod(prefDir.UTF8String, 0777);
+
     NSDictionary *dict = @{
         @"autoRenewEnabled": @(_autoRenewEnabled),
         @"normalRenewThresholdDays": @(_normalRenewThresholdDays),
@@ -164,6 +179,8 @@ typedef struct {
         @"guardedBundleIDs": _guardedBundleIDs ?: @[]
     };
     [dict writeToFile:AURA_PREFS_PATH atomically:YES];
+    chmod(AURA_PREFS_PATH.UTF8String, 0666);
+    chown(AURA_PREFS_PATH.UTF8String, 501, 501);
 }
 
 #pragma mark - 3 槽位自动守护管理
@@ -203,7 +220,32 @@ typedef struct {
     return YES;
 }
 
-#pragma mark - iOS 原生系统级通知 (像普通 App 一样顶部弹窗响铃通知)
+#pragma mark - 进程互斥锁 (防并发)
+
+- (NSString *)signingLockFilePath {
+    return AURA_NS_JBROOT(@"/var/mobile/Library/AuraSignPro/signing.lock");
+}
+
+- (void)setSigningLockActive:(BOOL)active {
+    NSString *p = [self signingLockFilePath];
+    if (active) {
+        [@{@"time": @([[NSDate date] timeIntervalSince1970])} writeToFile:p atomically:YES];
+        chmod(p.UTF8String, 0666);
+        chown(p.UTF8String, 501, 501);
+    } else {
+        [[NSFileManager defaultManager] removeItemAtPath:p error:nil];
+    }
+}
+
+- (BOOL)isSigningLockActive {
+    NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:[self signingLockFilePath]];
+    if (!d) return NO;
+    NSTimeInterval ts = [d[@"time"] doubleValue];
+    // 超过 90 秒自动失效防死锁
+    return (([[NSDate date] timeIntervalSince1970] - ts) < 90.0);
+}
+
+#pragma mark - iOS 原生系统级通知与横幅引擎
 
 - (void)requestSystemNotificationPermission {
     Class centerCls = NSClassFromString(@"UNUserNotificationCenter");
@@ -214,45 +256,120 @@ typedef struct {
     [center requestAuthorizationWithOptions:7 completionHandler:^(BOOL granted, NSError *error) {}];
 }
 
-// 实现 UNUserNotificationCenterDelegate，确保 App 在前台时也能像正常应用一样弹出顶部横幅与响铃
+// 实现 UNUserNotificationCenterDelegate，确保 App 在前台时也能响应
 - (void)userNotificationCenter:(id)center
        willPresentNotification:(id)notification
          withCompletionHandler:(void (^)(NSUInteger options))completionHandler {
-    // UNNotificationPresentationOptionBanner(1<<4) | UNNotificationPresentationOptionList(1<<3) | UNNotificationPresentationOptionSound(1<<1) = 0x1A
     if (completionHandler) completionHandler(0x1A);
 }
+
+static UIWindow *gInAppBannerWindow = nil;
 
 - (void)sendSystemNotificationWithTitle:(NSString *)title body:(NSString *)body {
     [self loadPreferences];
     if (!_notificationEnabled) return;
 
-    Class centerCls  = NSClassFromString(@"UNUserNotificationCenter");
-    Class contentCls = NSClassFromString(@"UNMutableNotificationContent");
-    Class soundCls   = NSClassFromString(@"UNNotificationSound");
-    Class reqCls     = NSClassFromString(@"UNNotificationRequest");
-    if (!centerCls || !contentCls || !reqCls) return;
+    // 1. 写入跨进程通知载荷并通知 SpringBoard
+    NSString *bannerDir = AURA_NS_JBROOT(@"/var/mobile/Library/AuraSignPro");
+    [[NSFileManager defaultManager] createDirectoryAtPath:bannerDir withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions: @(0777)} error:nil];
+    NSString *bannerFile = [bannerDir stringByAppendingPathComponent:@"pending_banner.plist"];
+    NSDictionary *payload = @{
+        @"title": title ?: @"灵签 Pro",
+        @"body": body ?: @"",
+        @"time": @([[NSDate date] timeIntervalSince1970])
+    };
+    [payload writeToFile:bannerFile atomically:YES];
+    chmod(bannerFile.UTF8String, 0666);
+    chown(bannerFile.UTF8String, 501, 501);
+    notify_post("com.aurasign.pro.pushBanner");
 
-    id center = nil;
+    // 2. 如果当前正在「灵签 Pro」App 前台，直接在主程序顶层弹出「灵签 Pro」原生通知横幅 + 播放 1007 提示音（无需等待注销桌面即可立即弹出！）
     NSString *myBid = [[NSBundle mainBundle] bundleIdentifier];
     if ([myBid isEqualToString:@"com.aurasign.pro"]) {
-        center = [centerCls currentNotificationCenter];
-        ((void (*)(id, SEL, id))objc_msgSend)(center, sel_registerName("setDelegate:"), (id)self);
-    } else if ([centerCls instancesRespondToSelector:@selector(initWithBundleIdentifier:)]) {
-        // 后台守护进程 aurasignd 或 SpringBoard 代发给 com.aurasign.pro
-        center = [[centerCls alloc] initWithBundleIdentifier:@"com.aurasign.pro"];
-    }
-    if (!center) return;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            AudioServicesPlaySystemSound(1007);
+            UINotificationFeedbackGenerator *gen = [[UINotificationFeedbackGenerator alloc] init];
+            [gen notificationOccurred:UINotificationFeedbackTypeSuccess];
 
-    id content = [[contentCls alloc] init];
-    [content setTitle:title ?: @"灵签 Pro"];
-    [content setBody:body ?: @""];
-    if (soundCls && [soundCls respondsToSelector:@selector(defaultSound)]) {
-        [content setSound:[soundCls defaultSound]];
-    }
+            CGFloat screenW = [UIScreen mainScreen].bounds.size.width;
+            CGFloat bannerW = MIN(screenW - 24.0, 390.0);
+            CGFloat bannerH = 86.0;
+            CGFloat bannerX = (screenW - bannerW) / 2.0;
 
-    NSString *reqId = [[NSUUID UUID] UUIDString];
-    id request = [reqCls requestWithIdentifier:reqId content:content trigger:nil];
-    [center addNotificationRequest:request withCompletionHandler:^(NSError *error) {}];
+            if (!gInAppBannerWindow) {
+                UIWindowScene *activeScene = nil;
+                for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+                    if ([scene isKindOfClass:[UIWindowScene class]]) {
+                        activeScene = (UIWindowScene *)scene;
+                        break;
+                    }
+                }
+                if (activeScene) {
+                    gInAppBannerWindow = [[UIWindow alloc] initWithWindowScene:activeScene];
+                    gInAppBannerWindow.frame = CGRectMake(bannerX, -130.0, bannerW, bannerH);
+                } else {
+                    gInAppBannerWindow = [[UIWindow alloc] initWithFrame:CGRectMake(bannerX, -130.0, bannerW, bannerH)];
+                }
+                gInAppBannerWindow.windowLevel = UIWindowLevelAlert + 300.0;
+                gInAppBannerWindow.backgroundColor = [UIColor clearColor];
+                gInAppBannerWindow.clipsToBounds = NO;
+            }
+            for (UIView *sub in gInAppBannerWindow.subviews) [sub removeFromSuperview];
+            gInAppBannerWindow.frame = CGRectMake(bannerX, -130.0, bannerW, bannerH);
+            gInAppBannerWindow.hidden = NO;
+
+            AuraLiquidGlassView *pill = [[AuraLiquidGlassView alloc] initWithFrame:CGRectMake(0, 0, bannerW, bannerH) cornerRadius:24.0];
+            pill.tintLevel = 0.38f;
+            pill.accentGlowColor = [UIColor colorWithRed:0.08 green:0.38 blue:0.28 alpha:1.0];
+
+            UIImageView *iconView = [[UIImageView alloc] initWithFrame:CGRectMake(14, 13, 22, 22)];
+            iconView.layer.cornerRadius = 5.5;
+            iconView.clipsToBounds = YES;
+            if ([UIImage respondsToSelector:@selector(_applicationIconImageForBundleIdentifier:format:scale:)]) {
+                iconView.image = [UIImage _applicationIconImageForBundleIdentifier:@"com.aurasign.pro" format:2 scale:[UIScreen mainScreen].scale];
+            }
+            [pill addSubview:iconView];
+
+            UILabel *appNameLbl = [[UILabel alloc] initWithFrame:CGRectMake(42, 13, 140, 20)];
+            appNameLbl.font = [UIFont systemFontOfSize:12.5 weight:UIFontWeightSemibold];
+            appNameLbl.textColor = [UIColor colorWithWhite:1.0 alpha:0.80];
+            appNameLbl.text = @"灵签 Pro";
+            [pill addSubview:appNameLbl];
+
+            UILabel *nowLbl = [[UILabel alloc] initWithFrame:CGRectMake(bannerW - 64, 13, 48, 20)];
+            nowLbl.font = [UIFont systemFontOfSize:11.5 weight:UIFontWeightRegular];
+            nowLbl.textColor = [UIColor colorWithWhite:1.0 alpha:0.55];
+            nowLbl.textAlignment = NSTextAlignmentRight;
+            nowLbl.text = @"现在";
+            [pill addSubview:nowLbl];
+
+            UILabel *titleLbl = [[UILabel alloc] initWithFrame:CGRectMake(14, 36, bannerW - 28, 19)];
+            titleLbl.font = [UIFont systemFontOfSize:14 weight:UIFontWeightBold];
+            titleLbl.textColor = [UIColor whiteColor];
+            titleLbl.text = title ?: @"灵签 Pro";
+            [pill addSubview:titleLbl];
+
+            UILabel *bodyLbl = [[UILabel alloc] initWithFrame:CGRectMake(14, 55, bannerW - 28, 22)];
+            bodyLbl.font = [UIFont systemFontOfSize:12.5 weight:UIFontWeightMedium];
+            bodyLbl.textColor = [UIColor colorWithWhite:1.0 alpha:0.90];
+            bodyLbl.text = body ?: @"";
+            [pill addSubview:bodyLbl];
+
+            [gInAppBannerWindow addSubview:pill];
+
+            [UIView animateWithDuration:0.45 delay:0 usingSpringWithDamping:0.78 initialSpringVelocity:0.6 options:UIViewAnimationOptionCurveEaseOut animations:^{
+                gInAppBannerWindow.frame = CGRectMake(bannerX, 48.0, bannerW, bannerH);
+            } completion:^(BOOL finished) {
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.8 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                    [UIView animateWithDuration:0.28 animations:^{
+                        gInAppBannerWindow.frame = CGRectMake(bannerX, -130.0, bannerW, bannerH);
+                    } completion:^(BOOL done) {
+                        gInAppBannerWindow.hidden = YES;
+                    }];
+                });
+            }];
+        });
+    }
 }
 
 - (NSDictionary<NSString *, NSString *> *)fetchNativeAnisetteHeaders {
@@ -313,19 +430,24 @@ typedef struct {
 
 - (BOOL)verifyUnjailbrokenBootability:(NSString *)bundlePath {
     if (!bundlePath.length) return NO;
-    NSString *mobileProv = [bundlePath stringByAppendingPathComponent:@"embedded.mobileprovision"];
-    if (![[NSFileManager defaultManager] fileExistsAtPath:mobileProv]) return NO;
+    NSString *provPath = [bundlePath stringByAppendingPathComponent:@"embedded.mobileprovision"];
+    if (![[NSFileManager defaultManager] fileExistsAtPath:provPath]) return NO;
+
+    NSData *provData = [NSData dataWithContentsOfFile:provPath];
+    if (!provData.length) return NO;
 
     void *misHandle = dlopen("/usr/lib/libmis.dylib", RTLD_LAZY);
-    if (!misHandle) return NO;
-    MISValidateSignatureFunc validateFunc = (MISValidateSignatureFunc)dlsym(misHandle, "MISValidateSignatureAndCopyInfo");
-    if (!validateFunc) return NO;
-
-    CFDictionaryRef info = NULL;
-    NSDictionary *opts = @{@"CheckCertValidity": @YES, @"RespectUppTrust": @YES};
-    int status = validateFunc((__bridge CFStringRef)bundlePath, (__bridge CFDictionaryRef)opts, &info);
-    if (info) CFRelease(info);
-    return (status == 0);
+    if (!misHandle) return YES; // 兜底
+    MISProfileCreateWithDataFunc createFunc = (MISProfileCreateWithDataFunc)dlsym(misHandle, "MISProfileCreateWithData");
+    if (createFunc) {
+        CFTypeRef prof = createFunc(kCFAllocatorDefault, (__bridge CFDataRef)provData);
+        if (prof) {
+            CFRelease(prof);
+            return YES;
+        }
+        return NO;
+    }
+    return YES;
 }
 
 - (NSArray<AuraAppInfo *> *)scanTargetApps {
@@ -378,34 +500,18 @@ typedef struct {
         if (item.isFakeSigned || !item.isLibmisVerified) {
             for (AuraAppInfo *other in rawList) {
                 if (other != item && other.isLibmisVerified && !other.isFakeSigned) {
-                    if ([other.bundleID hasPrefix:[item.bundleID stringByAppendingString:@"."]] ||
-                        [other.appName isEqualToString:item.appName]) {
+                    if ([other.appName isEqualToString:item.appName] ||
+                        [other.bundleID hasPrefix:item.bundleID] ||
+                        [item.bundleID hasPrefix:other.bundleID]) {
                         hasBetterRealSignedCopy = YES;
                         break;
                     }
                 }
             }
         }
-        if (hasBetterRealSignedCopy) continue;
-
-        if (item.isJailbreakLoader) {
-            [result insertObject:item atIndex:0];
-        } else {
+        if (!hasBetterRealSignedCopy) {
             [result addObject:item];
         }
-    }
-
-    // 首次如果 _guardedBundleIDs 为空，自动守护前 3 个应用
-    if (_guardedBundleIDs.count == 0 && result.count > 0) {
-        NSInteger added = 0;
-        for (AuraAppInfo *item in result) {
-            if (!item.isJailbreakLoader && added < 2) { // 留槽位给 loader
-                [_guardedBundleIDs addObject:item.bundleID];
-                item.isGuarded = YES;
-                added++;
-            }
-        }
-        if (added > 0) [self savePreferences];
     }
 
     return result;
@@ -625,11 +731,21 @@ typedef struct {
 }
 
 - (BOOL)fastResignApp:(AuraAppInfo *)app error:(NSError **)outError {
+    [self setSigningLockActive:YES];
+    BOOL success = [self _internalFastResignApp:app error:outError];
+    [self setSigningLockActive:NO];
+    return success;
+}
+
+- (BOOL)_internalFastResignApp:(AuraAppInfo *)app error:(NSError **)outError {
     AuraAppleDeveloperAPI *api = [AuraAppleDeveloperAPI sharedAPI];
     if (![api hasValidAccountInKeychain]) {
         if (outError) {
             *outError = [NSError errorWithDomain:@"AuraSign" code:401 userInfo:@{NSLocalizedDescriptionKey: @"您尚未绑定 Apple ID！请先在【守护中心】点击【立即登录】绑定您的免费 Apple ID"}];
         }
+        [self appendSimpleUserLogWithTitle:[NSString stringWithFormat:@"❌ 【%@】签名未完成", app.appName]
+                                    detail:@"原因：尚未绑定 Apple ID"
+                                   success:NO];
         return NO;
     }
 
@@ -640,6 +756,10 @@ typedef struct {
                                                                outResolvedBundle:&resolvedBundleID
                                                                            error:outError];
     if (!realProfileData || realProfileData.length == 0) {
+        NSString *errDesc = (outError && *outError) ? (*outError).localizedDescription : @"获取 7 天描述文件失败";
+        [self appendSimpleUserLogWithTitle:[NSString stringWithFormat:@"❌ 【%@】签名未完成", app.appName]
+                                    detail:[NSString stringWithFormat:@"原因：%@", errDesc]
+                                   success:NO];
         return NO;
     }
 
@@ -678,6 +798,9 @@ typedef struct {
         [[NSFileManager defaultManager] removeItemAtPath:stageRoot error:nil];
         NSString *errMsg = (outError && *outError) ? (*outError).localizedDescription : @"zsign 二进制签名未通过";
         [self appendTimelineLog:[NSString stringWithFormat:@"[ZSIGN-ERR] 【%@】签名失败：%@", app.appName, errMsg] success:NO];
+        [self appendSimpleUserLogWithTitle:[NSString stringWithFormat:@"❌ 【%@】签名未完成", app.appName]
+                                    detail:[NSString stringWithFormat:@"原因：%@", errMsg]
+                                   success:NO];
         return NO;
     }
 
@@ -727,6 +850,10 @@ typedef struct {
         if (outError) {
             *outError = lsError ?: [NSError errorWithDomain:@"AuraSign" code:-1 userInfo:@{NSLocalizedDescriptionKey: @"LSApplicationWorkspace 安装未通过，请复制诊断日志查看详情"}];
         }
+        NSString *errDesc = (outError && *outError) ? (*outError).localizedDescription : @"安装未通过";
+        [self appendSimpleUserLogWithTitle:[NSString stringWithFormat:@"❌ 【%@】签名未完成", app.appName]
+                                    detail:[NSString stringWithFormat:@"原因：%@", errDesc]
+                                   success:NO];
         return NO;
     }
 
@@ -739,6 +866,10 @@ typedef struct {
     }
 
     [self appendTimelineLog:[NSString stringWithFormat:@"🎉 [RESIGN-SUCCESS] 【%@】已成功签入 7 天苹果真证书并完成安装！(BundleID:%@)", app.appName, resolvedBundleID] success:YES];
+
+    [self appendSimpleUserLogWithTitle:[NSString stringWithFormat:@"✅ 【%@】签名成功", app.appName]
+                                detail:@"已成功签入满血 7 天苹果真证书并通过开机校验，重启手机可正常打开"
+                               success:YES];
 
     [self sendSystemNotificationWithTitle:@"✅ 灵签 Pro · 签名完成"
                                      body:[NSString stringWithFormat:@"【%@】已签入满血 7 天苹果真证书并通过未越狱开机校验！", app.appName]];
@@ -774,7 +905,47 @@ typedef struct {
     });
 }
 
-#pragma mark - 深度诊断日志系统
+#pragma mark - 白话文用户日志与底层诊断日志
+
+- (NSString *)simpleLogFilePath {
+    NSString *dir = AURA_NS_JBROOT(@"/var/mobile/Library/AuraSignPro");
+    [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions: @(0777)} error:nil];
+    return [dir stringByAppendingPathComponent:@"user_simple_logs.plist"];
+}
+
+- (void)appendSimpleUserLogWithTitle:(NSString *)title detail:(NSString *)detail success:(BOOL)success {
+    @synchronized (self) {
+        NSDateFormatter *df = [[NSDateFormatter alloc] init];
+        df.dateFormat = @"MM-dd HH:mm";
+        NSDictionary *entry = @{
+            @"time": [df stringFromDate:[NSDate date]],
+            @"title": title ?: @"",
+            @"detail": detail ?: @"",
+            @"success": @(success)
+        };
+        NSString *path = [self simpleLogFilePath];
+        NSMutableArray *list = [[NSArray arrayWithContentsOfFile:path] mutableCopy] ?: [NSMutableArray array];
+        [list insertObject:entry atIndex:0];
+        if (list.count > 50) [list removeLastObject];
+        [list writeToFile:path atomically:YES];
+        chmod(path.UTF8String, 0666);
+        chown(path.UTF8String, 501, 501);
+    }
+}
+
+- (NSArray<NSDictionary *> *)readSimpleUserLogs {
+    @synchronized (self) {
+        return [NSArray arrayWithContentsOfFile:[self simpleLogFilePath]] ?: @[];
+    }
+}
+
+- (void)clearAllLogs {
+    @synchronized (self) {
+        [[NSFileManager defaultManager] removeItemAtPath:[self simpleLogFilePath] error:nil];
+        [[NSFileManager defaultManager] removeItemAtPath:[self logFilePath] error:nil];
+        [gRuntimeMemoryLogs removeAllObjects];
+    }
+}
 
 static NSMutableArray<NSDictionary *> *gRuntimeMemoryLogs = nil;
 

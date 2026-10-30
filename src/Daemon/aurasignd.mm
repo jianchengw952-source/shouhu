@@ -19,6 +19,7 @@ static void ensureSharedDirPermissions(void) {
     NSString *baseDir = AURA_NS_JBROOT(@"/var/mobile/Library/AuraSignPro");
     NSString *certDir = [baseDir stringByAppendingPathComponent:@"KeychainCert"];
     NSString *logFile = [baseDir stringByAppendingPathComponent:@"timeline.plist"];
+    NSString *simpleLogFile = [baseDir stringByAppendingPathComponent:@"user_simple_logs.plist"];
     [[NSFileManager defaultManager] createDirectoryAtPath:certDir withIntermediateDirectories:YES attributes:nil error:nil];
     chown(baseDir.UTF8String, 501, 501);
     chmod(baseDir.UTF8String, 0777);
@@ -27,6 +28,10 @@ static void ensureSharedDirPermissions(void) {
     if ([[NSFileManager defaultManager] fileExistsAtPath:logFile]) {
         chown(logFile.UTF8String, 501, 501);
         chmod(logFile.UTF8String, 0666);
+    }
+    if ([[NSFileManager defaultManager] fileExistsAtPath:simpleLogFile]) {
+        chown(simpleLogFile.UTF8String, 501, 501);
+        chmod(simpleLogFile.UTF8String, 0666);
     }
 }
 
@@ -75,6 +80,11 @@ static NSInteger getHardwareBatteryPercent(BOOL *outIsCharging) {
 static void runDaemonSignCheck(BOOL isFromBatteryNotification) {
     ensureSharedDirPermissions();
 
+    // 互斥锁检查：如果前台正在操作签名，后台守护进程暂不介入
+    if ([[AuraSignEngine sharedEngine] isSigningLockActive]) {
+        return;
+    }
+
     // 如果用户还没在桌面 App 里绑定 Apple ID，后台进程直接静默返回，绝不每 2 分钟刷屏报错
     if (![[AuraAppleDeveloperAPI sharedAPI] hasValidAccountInKeychain]) {
         return;
@@ -93,6 +103,7 @@ static void runDaemonSignCheck(BOOL isFromBatteryNotification) {
 
     NSArray<AuraAppInfo *> *apps = [engine scanTargetApps];
     for (AuraAppInfo *app in apps) {
+        // 严格只处理已开启守护的应用或越狱加载器（未开启守护的第三方软件绝不自动续签）
         if (!app.isGuarded && !app.isJailbreakLoader) continue;
 
         BOOL shouldSign = NO;
@@ -120,7 +131,11 @@ static void runDaemonSignCheck(BOOL isFromBatteryNotification) {
             [engine appendTimelineLog:reason success:YES];
             NSError *err = nil;
             BOOL ok = [engine fastResignApp:app error:&err];
-            if (!ok && err) {
+            if (ok) {
+                [engine appendSimpleUserLogWithTitle:(isFromBatteryNotification ? @"🔋 低电量紧急抢救成功" : @"⚡ 后台自动续签成功")
+                                              detail:[NSString stringWithFormat:@"后台已自动为您将【%@】续签至满血 7 天有效期", app.appName]
+                                             success:YES];
+            } else if (err) {
                 [engine sendSystemNotificationWithTitle:@"⚠️ 灵签 Pro · 自动续签未完成"
                                                    body:[NSString stringWithFormat:@"【%@】后台续签失败：%@", app.appName, err.localizedDescription ?: @"请检查网络"]];
             }
