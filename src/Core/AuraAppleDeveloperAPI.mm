@@ -1,4 +1,4 @@
-// src/Core/AuraAppleDeveloperAPI.mm (第1/2步保持 iPhone 标识通过 ec=0 + 第3步切换 Mac15,7 标识绕过苹果 10月22日 -80046 限制终极版)
+// src/Core/AuraAppleDeveloperAPI.mm (修正 /services/QH65B2/ 官方路径 + 补齐 X-Apple-App-Info 请求头 + 503 自动重试终极版)
 #import <CoreFoundation/CoreFoundation.h>
 #import <UIKit/UIKit.h>
 #import <CommonCrypto/CommonDigest.h>
@@ -154,6 +154,27 @@ static const char *kRFC5054_2048_N_Hex =
         }
     }
     return @"";
+}
+
+- (NSString *)realDeviceSerialNumber {
+    void *gestalt = dlopen("/usr/lib/libMobileGestalt.dylib", RTLD_LAZY);
+    if (gestalt) {
+        MGCopyAnswerFunc copyAnswer = (MGCopyAnswerFunc)dlsym(gestalt, "MGCopyAnswer");
+        if (copyAnswer) {
+            CFStringRef snRef = (CFStringRef)copyAnswer(CFSTR("SerialNumber"));
+            if (snRef) return (__bridge_transfer NSString *)snRef;
+        }
+    }
+    return @"C02ABCDEF123";
+}
+
+- (NSString *)localUserIDHex {
+    NSString *seed = [[self realDeviceUDID] stringByAppendingString:@"-mobile"];
+    NSData *hash = [self sha256Data:[seed dataUsingEncoding:NSUTF8StringEncoding]];
+    NSMutableString *hex = [NSMutableString stringWithCapacity:64];
+    const unsigned char *bytes = (const unsigned char *)hash.bytes;
+    for (int i = 0; i < 32; i++) [hex appendFormat:@"%02X", bytes[i]];
+    return hex;
 }
 
 - (NSString *)findBinaryNamed:(NSString *)name {
@@ -312,7 +333,7 @@ static const char *kRFC5054_2048_N_Hex =
     return plain;
 }
 
-#pragma mark - 【关键突破】：init/complete 用 iPhone 标识，apptokens 切换为 Mac15,7 标识绕过 -80046！
+#pragma mark - GSA SRP6a 请求 (自带 503 自动重试)
 
 - (NSDictionary *)sendGSAServiceRequest:(NSDictionary *)requestDict {
     NSDictionary *rootPlist = @{
@@ -325,7 +346,6 @@ static const char *kRFC5054_2048_N_Hex =
     NSDictionary *headers = nil;
 
     if (isAppTokensRequest) {
-        // 第 3 步 (apptokens 索取 com.apple.gs.xcode.auth)：必须声明为 Mac15,7 + Xcode 27.0，完美绕过苹果 10月22日 新增的 -80046 限制！
         headers = @{
             @"Content-Type": @"text/x-xml-plist",
             @"Accept": @"text/x-xml-plist",
@@ -335,7 +355,6 @@ static const char *kRFC5054_2048_N_Hex =
             @"X-Apple-App-Info": @"com.apple.gs.xcode.auth"
         };
     } else {
-        // 第 1、2 步 (init 与 complete)：保持与本机 Anisette 匹配的 iPhone15,2 标识（已验证 ec=0 一次过！）
         headers = @{
             @"Content-Type": @"text/x-xml-plist",
             @"Accept": @"*/*",
@@ -344,18 +363,24 @@ static const char *kRFC5054_2048_N_Hex =
         };
     }
 
+    // 遇到苹果 CDN 偶发 503 Service Temporarily Unavailable 时自动等待 1.5 秒重试（最多 3 次）
     int curlExit = 0;
-    NSData *respData = [self executeCurlRequestWithURL:@"https://gsa.apple.com/grandslam/GsService2"
-                                                method:@"POST"
-                                               headers:headers
-                                              bodyData:bodyData
-                                           outExitCode:&curlExit];
-    if (respData.length > 0) {
-        NSDictionary *parsed = [NSPropertyListSerialization propertyListWithData:respData options:0 format:NULL error:NULL];
-        if ([parsed isKindOfClass:[NSDictionary class]]) {
-            return parsed[@"Response"] ?: parsed;
+    NSData *respData = nil;
+    for (int attempt = 1; attempt <= 3; attempt++) {
+        respData = [self executeCurlRequestWithURL:@"https://gsa.apple.com/grandslam/GsService2"
+                                            method:@"POST"
+                                           headers:headers
+                                          bodyData:bodyData
+                                       outExitCode:&curlExit];
+        if (respData.length > 0) {
+            NSDictionary *parsed = [NSPropertyListSerialization propertyListWithData:respData options:0 format:NULL error:NULL];
+            if ([parsed isKindOfClass:[NSDictionary class]]) {
+                return parsed[@"Response"] ?: parsed;
+            }
         }
+        [NSThread sleepForTimeInterval:1.5];
     }
+
     NSString *rawPreview = [[NSString alloc] initWithData:respData encoding:NSUTF8StringEncoding] ?: @"non-utf8";
     if (rawPreview.length > 120) rawPreview = [rawPreview substringToIndex:120];
     [[AuraSignEngine sharedEngine] appendTimelineLog:[NSString stringWithFormat:@"[GSA-CURL-ERR] exit=%d, len=%lu, raw=%@", curlExit, (unsigned long)respData.length, rawPreview] success:NO];
@@ -415,7 +440,7 @@ static const char *kRFC5054_2048_N_Hex =
     return (ec == 0);
 }
 
-#pragma mark - 完整 GSA SRP6a 握手 + 双重验证 + 兑换 com.apple.gs.xcode.auth 令牌
+#pragma mark - 完整 GSA SRP6a 握手 + 兑换 com.apple.gs.xcode.auth 令牌 + 请求 /services/QH65B2/
 
 - (void)loginWithAppleID:(NSString *)email
                 password:(NSString *)password
@@ -654,7 +679,7 @@ static const char *kRFC5054_2048_N_Hex =
             return;
         }
 
-        // ==================== GSA Step 3: 发送 apptokens (自动切换为 Mac15,7 标识绕过 -80046) ====================
+        // ==================== GSA Step 3: 发送 apptokens 兑换 com.apple.gs.xcode.auth ====================
         NSString *appName = @"com.apple.gs.xcode.auth";
         NSMutableData *chkInput = [NSMutableData dataWithData:[@"apptokens" dataUsingEncoding:NSUTF8StringEncoding]];
         [chkInput appendData:[adsid dataUsingEncoding:NSUTF8StringEncoding]];
@@ -701,7 +726,7 @@ static const char *kRFC5054_2048_N_Hex =
             return;
         }
 
-        // ==================== Step 4: 用真正的 com.apple.gs.xcode.auth 令牌请求 QH65B2 开发者中心 ====================
+        // ==================== Step 4: 用真正的 com.apple.gs.xcode.auth 令牌请求 /services/QH65B2/ ====================
         NSMutableDictionary *sess = [NSMutableDictionary dictionaryWithDictionary:@{
             @"email": username,
             @"adsid": adsid,
@@ -711,6 +736,7 @@ static const char *kRFC5054_2048_N_Hex =
         }];
 
         NSError *stepErr = nil;
+        // 【关键修复】：listTeams.action 位于 /services/QH65B2/listTeams.action，其余操作位于 /services/QH65B2/ios/...
         NSDictionary *teamsResp = [self sendQH65B2Request:@"listTeams.action" bodyDict:@{} session:sess outError:&stepErr];
         NSArray *teams = teamsResp[@"teams"];
         if (![teams isKindOfClass:[NSArray class]] || teams.count == 0) {
@@ -723,7 +749,7 @@ static const char *kRFC5054_2048_N_Hex =
         sess[@"teamId"] = teamId;
 
         if (udid.length) {
-            [self sendQH65B2Request:@"addDevice.action" bodyDict:@{
+            [self sendQH65B2Request:@"ios/addDevice.action" bodyDict:@{
                 @"teamId": teamId,
                 @"deviceNumber": udid,
                 @"name": [[UIDevice currentDevice] name] ?: @"iPhone"
@@ -732,25 +758,32 @@ static const char *kRFC5054_2048_N_Hex =
 
         NSString *csrContent = [self generatePrivateKeyAndCSRPEMForEmail:username];
         NSError *csrErr = nil;
-        NSDictionary *certResp = [self sendQH65B2Request:@"submitDevelopmentCSR.action" bodyDict:@{
+        NSDictionary *certResp = [self sendQH65B2Request:@"ios/submitDevelopmentCSR.action" bodyDict:@{
             @"teamId": teamId,
-            @"csrContent": csrContent
+            @"csrContent": csrContent,
+            @"machineId": [[NSUUID UUID] UUIDString],
+            @"machineName": @"AuraSignPro"
         } session:sess outError:&csrErr];
 
         NSData *derCert = certResp[@"certRequest"][@"certificate"][@"certContent"];
 
         if (!derCert && csrErr.code == 7460) {
-            NSDictionary *listCerts = [self sendQH65B2Request:@"listAllDevelopmentCerts.action" bodyDict:@{@"teamId": teamId} session:sess outError:NULL];
+            NSDictionary *listCerts = [self sendQH65B2Request:@"ios/listAllDevelopmentCerts.action" bodyDict:@{@"teamId": teamId} session:sess outError:NULL];
             NSArray *certs = listCerts[@"certificates"];
             if ([certs isKindOfClass:[NSArray class]]) {
                 for (NSDictionary *c in certs) {
                     NSString *serial = c[@"serialNumber"];
                     if (serial.length) {
-                        [self sendQH65B2Request:@"revokeDevelopmentCert.action" bodyDict:@{@"teamId": teamId, @"serialNumber": serial} session:sess outError:NULL];
+                        [self sendQH65B2Request:@"ios/revokeDevelopmentCert.action" bodyDict:@{@"teamId": teamId, @"serialNumber": serial} session:sess outError:NULL];
                     }
                 }
             }
-            certResp = [self sendQH65B2Request:@"submitDevelopmentCSR.action" bodyDict:@{@"teamId": teamId, @"csrContent": csrContent} session:sess outError:&csrErr];
+            certResp = [self sendQH65B2Request:@"ios/submitDevelopmentCSR.action" bodyDict:@{
+                @"teamId": teamId,
+                @"csrContent": csrContent,
+                @"machineId": [[NSUUID UUID] UUIDString],
+                @"machineName": @"AuraSignPro"
+            } session:sess outError:&csrErr];
             derCert = certResp[@"certRequest"][@"certificate"][@"certContent"];
         }
 
@@ -771,7 +804,7 @@ static const char *kRFC5054_2048_N_Hex =
     });
 }
 
-#pragma mark - OpenSSL 证书合成、QH65B2 请求、AppID注册与 zsign 签名
+#pragma mark - OpenSSL 证书合成、/services/QH65B2/ 请求、AppID注册与 zsign 签名
 
 - (NSString *)generatePrivateKeyAndCSRPEMForEmail:(NSString *)email {
     NSString *keyPath = [[self keychainDir] stringByAppendingPathComponent:@"dev_key.pem"];
@@ -809,22 +842,27 @@ static const char *kRFC5054_2048_N_Hex =
     return (r1 == 0 && r2 == 0 && [[NSFileManager defaultManager] fileExistsAtPath:p12Path]);
 }
 
+// 【关键修复】：严格对齐 AltSign 的 /services/QH65B2/ 根路径与 X-Apple-App-Info 请求头！
 - (NSDictionary *)sendQH65B2Request:(NSString *)actionPath
                            bodyDict:(NSDictionary *)bodyDict
                             session:(NSDictionary *)session
                            outError:(NSError **)outError {
-    NSString *urlStr = [NSString stringWithFormat:@"https://developerservices2.apple.com/QH65B2/ios/%@?clientId=XABBG36SBA", actionPath];
+    NSString *urlStr = [NSString stringWithFormat:@"https://developerservices2.apple.com/services/QH65B2/%@?clientId=XABBG36SBA", actionPath];
 
     NSMutableDictionary *headers = [NSMutableDictionary dictionaryWithDictionary:[[AuraSignEngine sharedEngine] fetchNativeAnisetteHeaders]];
     NSString *udid = [self realDeviceUDID];
     if (udid.length) headers[@"X-Mme-Device-Id"] = udid;
+    headers[@"X-Apple-I-MD-LU"] = [self localUserIDHex];
+    headers[@"X-Apple-I-SRL-NO"] = [self realDeviceSerialNumber];
     if ([session[@"adsid"] length]) headers[@"X-Apple-I-Identity-Id"] = session[@"adsid"];
     if ([session[@"xcodeToken"] length]) headers[@"X-Apple-GS-Token"] = session[@"xcodeToken"];
+    headers[@"X-Apple-App-Info"] = @"com.apple.gs.xcode.auth";
     headers[@"User-Agent"] = @"Xcode";
-    headers[@"X-Xcode-Version"] = @"27.0 (27A5218g)";
+    headers[@"X-Xcode-Version"] = @"11.2 (11B41)";
     headers[@"X-MMe-Client-Info"] = @"<Mac15,7> <macOS;27.0;26A5378j> <com.apple.AuthKit/1 (com.apple.akd/1.0)>";
     headers[@"Content-Type"] = @"text/x-xml-plist";
     headers[@"Accept"] = @"text/x-xml-plist";
+    headers[@"Accept-Language"] = @"en-us";
 
     [[AuraSignEngine sharedEngine] appendTimelineLog:[NSString stringWithFormat:@"[QH65B2-REQ] %@ | ADSID=%@ | XcodeTokenLen=%lu",
         actionPath, session[@"adsid"] ?: @"空", (unsigned long)[session[@"xcodeToken"] length]] success:YES];
@@ -832,7 +870,7 @@ static const char *kRFC5054_2048_N_Hex =
     NSMutableDictionary *fullBody = [NSMutableDictionary dictionaryWithDictionary:bodyDict ?: @{}];
     fullBody[@"clientId"] = @"XABBG36SBA";
     fullBody[@"protocolVersion"] = @"QH65B2";
-    fullBody[@"requestId"] = [[NSUUID UUID] UUIDString];
+    fullBody[@"requestId"] = [[[NSUUID UUID] UUIDString] uppercaseString];
     NSData *xmlBodyData = [NSPropertyListSerialization dataWithPropertyList:fullBody format:NSPropertyListXMLFormat_v1_0 options:0 error:NULL];
 
     int curlExit = 0;
@@ -879,7 +917,7 @@ static const char *kRFC5054_2048_N_Hex =
     if (outResolvedBundleID) *outResolvedBundleID = targetBundleID;
 
     NSString *realAppIdPrimaryKey = nil;
-    NSDictionary *listResp = [self sendQH65B2Request:@"listAppIds.action" bodyDict:@{@"teamId": teamId} session:sess outError:NULL];
+    NSDictionary *listResp = [self sendQH65B2Request:@"ios/listAppIds.action" bodyDict:@{@"teamId": teamId} session:sess outError:NULL];
     NSArray *existingAppIds = listResp[@"appIds"];
     if ([existingAppIds isKindOfClass:[NSArray class]]) {
         for (NSDictionary *item in existingAppIds) {
@@ -898,7 +936,7 @@ static const char *kRFC5054_2048_N_Hex =
         if (!cleanName.length) cleanName = @"AuraSignApp";
 
         NSError *addErr = nil;
-        NSDictionary *addResp = [self sendQH65B2Request:@"addAppId.action" bodyDict:@{
+        NSDictionary *addResp = [self sendQH65B2Request:@"ios/addAppId.action" bodyDict:@{
             @"teamId": teamId,
             @"identifier": targetBundleID,
             @"name": cleanName
@@ -914,7 +952,7 @@ static const char *kRFC5054_2048_N_Hex =
     }
 
     NSError *dlErr = nil;
-    NSDictionary *profResp = [self sendQH65B2Request:@"downloadTeamProvisioningProfile.action" bodyDict:@{
+    NSDictionary *profResp = [self sendQH65B2Request:@"ios/downloadTeamProvisioningProfile.action" bodyDict:@{
         @"teamId": teamId,
         @"appIdId": realAppIdPrimaryKey
     } session:sess outError:&dlErr];
