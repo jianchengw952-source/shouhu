@@ -1,4 +1,4 @@
-// src/Core/AuraSignEngine.mm (内置纯 C 语言 IPA 打包器 + Developer/Customer/原位 uicache 三通道安装终极版)
+// src/Core/AuraSignEngine.mm (加入 AllowInstallLocalProvisioned=YES 免费7天证书安装授权终极版)
 #import <CoreFoundation/CoreFoundation.h>
 #import "AuraSignEngine.h"
 #import "AuraAppleDeveloperAPI.h"
@@ -221,9 +221,9 @@ typedef struct {
 }
 
 - (NSArray<AuraAppInfo *> *)scanTargetApps {
-    NSMutableArray<AuraAppInfo *> *result = [NSMutableArray array];
+    NSMutableArray<AuraAppInfo *> *rawList = [NSMutableArray array];
     Class wsClass = NSClassFromString(@"LSApplicationWorkspace");
-    if (!wsClass) return result;
+    if (!wsClass) return rawList;
 
     NSArray *allApps = [[wsClass defaultWorkspace] allInstalledApplications];
     for (id proxy in allApps) {
@@ -259,6 +259,25 @@ typedef struct {
             item.isFakeSigned = YES;
             item.isLibmisVerified = NO;
         }
+        [rawList addObject:item];
+    }
+
+    // 智能去重：如果某个应用（如 Dopamine）已经安装了带 .TeamID 的 7 天真证书版本，自动隐藏旧的假签名副本
+    NSMutableArray<AuraAppInfo *> *result = [NSMutableArray array];
+    for (AuraAppInfo *item in rawList) {
+        BOOL hasBetterRealSignedCopy = NO;
+        if (item.isFakeSigned || !item.isLibmisVerified) {
+            for (AuraAppInfo *other in rawList) {
+                if (other != item && other.isLibmisVerified && !other.isFakeSigned) {
+                    if ([other.bundleID hasPrefix:[item.bundleID stringByAppendingString:@"."]] ||
+                        [other.appName isEqualToString:item.appName]) {
+                        hasBetterRealSignedCopy = YES;
+                        break;
+                    }
+                }
+            }
+        }
+        if (hasBetterRealSignedCopy) continue;
 
         if (item.isJailbreakLoader) {
             [result insertObject:item atIndex:0];
@@ -333,7 +352,6 @@ typedef struct {
     }
 }
 
-// 内置纯 C 语言 ZIP (.ipa) 打包器：无须外部 zip 命令
 - (BOOL)createNativeIPAFromStageRoot:(NSString *)stageRoot toIpaPath:(NSString *)ipaPath {
     FILE *fp = fopen(ipaPath.UTF8String, "wb");
     if (!fp) return NO;
@@ -568,15 +586,36 @@ typedef struct {
 
     [self recursivelyFixInstalldPermissions:stageRoot];
 
+    // 先打包出一份独立的 signed.ipa（防止 installd 移动/消耗目录导致备选通道无文件可用）
+    NSString *signedIpaPath = [stageRoot stringByAppendingPathComponent:@"signed.ipa"];
+    BOOL ipaCreated = [self createNativeIPAFromStageRoot:stageRoot toIpaPath:signedIpaPath];
+
     Class wsClass = NSClassFromString(@"LSApplicationWorkspace");
     id workspace = [wsClass defaultWorkspace];
     BOOL installSuccess = NO;
     NSError *lsError = nil;
 
-    // 通道 1：直接通过 Developer 模式安装已原地签好名的 stagedAppPath (.app 目录)
-    if ([[NSFileManager defaultManager] fileExistsAtPath:stagedAppPath] &&
+    // 【核心修复】：必须传入 @"AllowInstallLocalProvisioned": @YES，否则 installd 会拒绝免费 7 天个人证书！
+    // 通道 1：通过 signed.ipa + AllowInstallLocalProvisioned=YES 标准安装
+    if (ipaCreated && [[NSFileManager defaultManager] fileExistsAtPath:signedIpaPath] &&
         [workspace respondsToSelector:@selector(installApplication:withOptions:error:)]) {
+        NSDictionary *ipaOpts = @{
+            @"AllowInstallLocalProvisioned": @YES,
+            @"IsUserInitiated": @YES,
+            @"CFBundleIdentifier": resolvedBundleID
+        };
+        installSuccess = [workspace installApplication:[NSURL fileURLWithPath:signedIpaPath] withOptions:ipaOpts error:&lsError];
+        [self appendTimelineLog:[NSString stringWithFormat:@"[LS-INSTALL-IPA] 【%@】installed=%d, err=%@",
+            app.appName, installSuccess, lsError.localizedDescription ?: @"nil"] success:installSuccess];
+    }
+
+    // 通道 2：若通道 1 未通过，通过 stagedAppPath (.app 目录) + AllowInstallLocalProvisioned=YES + Developer 模式安装
+    if (!installSuccess && [[NSFileManager defaultManager] fileExistsAtPath:stagedAppPath] &&
+        [workspace respondsToSelector:@selector(installApplication:withOptions:error:)]) {
+        lsError = nil;
         NSDictionary *devOpts = @{
+            @"AllowInstallLocalProvisioned": @YES,
+            @"IsUserInitiated": @YES,
             @"CFBundleIdentifier": resolvedBundleID,
             @"PackageType": @"Developer"
         };
@@ -585,51 +624,11 @@ typedef struct {
             app.appName, installSuccess, lsError.localizedDescription ?: @"nil"] success:installSuccess];
     }
 
-    // 通道 2：若通道 1 未通过，使用内置纯 C ZIP 打包器生成 signed.ipa 并通过 Customer 模式安装
-    if (!installSuccess && [workspace respondsToSelector:@selector(installApplication:withOptions:error:)]) {
-        NSString *signedIpaPath = [stageRoot stringByAppendingPathComponent:@"signed.ipa"];
-        if ([self createNativeIPAFromStageRoot:stageRoot toIpaPath:signedIpaPath]) {
-            lsError = nil;
-            NSDictionary *ipaOpts = @{
-                @"CFBundleIdentifier": resolvedBundleID,
-                @"PackageType": @"Customer"
-            };
-            installSuccess = [workspace installApplication:[NSURL fileURLWithPath:signedIpaPath] withOptions:ipaOpts error:&lsError];
-            [self appendTimelineLog:[NSString stringWithFormat:@"[LS-INSTALL-IPA] 【%@】installed=%d, err=%@",
-                app.appName, installSuccess, lsError.localizedDescription ?: @"nil"] success:installSuccess];
-        }
-    }
-
-    // 通道 3：针对本机已存在的假签名/越狱加载器 (因旧签名 TeamID 不一致被 installd 拦截时)，原位覆盖真签名并调用 uicache -p 刷新
-    if (!installSuccess && app.bundlePath.length > 0 && [[NSFileManager defaultManager] fileExistsAtPath:app.bundlePath] && !customBundleID.length) {
-        NSArray *subItems = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:stagedAppPath error:nil];
-        for (NSString *item in subItems) {
-            NSString *src = [stagedAppPath stringByAppendingPathComponent:item];
-            NSString *dst = [app.bundlePath stringByAppendingPathComponent:item];
-            [[NSFileManager defaultManager] removeItemAtPath:dst error:nil];
-            [[NSFileManager defaultManager] copyItemAtPath:src toPath:dst error:nil];
-        }
-        [self recursivelyFixInstalldPermissions:app.bundlePath];
-
-        NSString *uicacheBin = AURA_NS_JBROOT(@"/usr/bin/uicache");
-        if ([[NSFileManager defaultManager] fileExistsAtPath:uicacheBin]) {
-            const char *uArgs[] = {uicacheBin.UTF8String, "-p", app.bundlePath.UTF8String, NULL};
-            pid_t uPid = 0;
-            int uStatus = 0;
-            if (posix_spawn(&uPid, uicacheBin.UTF8String, NULL, NULL, (char *const *)uArgs, environ) == 0) {
-                waitpid(uPid, &uStatus, 0);
-            }
-        }
-        installSuccess = [self verifyUnjailbrokenBootability:app.bundlePath];
-        [self appendTimelineLog:[NSString stringWithFormat:@"[INPLACE-UICACHE] 【%@】原位替换真证书并校验 libmis=%d",
-            app.appName, installSuccess] success:installSuccess];
-    }
-
     [[NSFileManager defaultManager] removeItemAtPath:stageRoot error:nil];
 
     if (!installSuccess) {
         if (outError) {
-            *outError = lsError ?: [NSError errorWithDomain:@"AuraSign" code:-1 userInfo:@{NSLocalizedDescriptionKey: @"安装未通过，请复制诊断日志查看详情"}];
+            *outError = lsError ?: [NSError errorWithDomain:@"AuraSign" code:-1 userInfo:@{NSLocalizedDescriptionKey: @"LSApplicationWorkspace 安装未通过，请复制诊断日志查看详情"}];
         }
         return NO;
     }
