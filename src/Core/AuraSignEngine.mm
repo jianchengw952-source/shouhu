@@ -1,4 +1,4 @@
-// src/Core/AuraSignEngine.mm (加入 AllowInstallLocalProvisioned=YES 免费7天证书安装授权终极版)
+// src/Core/AuraSignEngine.mm (第1页：🛡️签名 | 第2页：⚙️设置 + 原生系统横幅通知 + 3槽位守护终极版)
 #import <CoreFoundation/CoreFoundation.h>
 #import "AuraSignEngine.h"
 #import "AuraAppleDeveloperAPI.h"
@@ -7,6 +7,7 @@
 #import <sys/stat.h>
 #import <spawn.h>
 #import <sys/wait.h>
+#import <unistd.h>
 
 #if defined(__APPLE__)
 #include <crt_externs.h>
@@ -29,6 +30,19 @@ extern char **environ;
 - (NSString *)shortVersionString;
 - (NSString *)localizedName;
 - (NSString *)applicationType;
+@end
+
+@interface NSObject (AuraUserNotificationsPrivate)
++ (id)currentNotificationCenter;
+- (instancetype)initWithBundleIdentifier:(NSString *)bundleId;
+- (void)setDelegate:(id)delegate;
+- (void)requestAuthorizationWithOptions:(NSUInteger)options completionHandler:(void (^)(BOOL granted, NSError *error))completionHandler;
+- (void)addNotificationRequest:(id)request withCompletionHandler:(void (^)(NSError *error))completionHandler;
+- (void)setTitle:(NSString *)title;
+- (void)setBody:(NSString *)body;
+- (void)setSound:(id)sound;
++ (id)defaultSound;
++ (id)requestWithIdentifier:(NSString *)identifier content:(id)content trigger:(id)trigger;
 @end
 
 typedef int (*MISValidateSignatureFunc)(CFStringRef file, CFDictionaryRef options, CFDictionaryRef *info);
@@ -96,10 +110,9 @@ typedef struct {
 @implementation AuraAppInfo
 @end
 
-@implementation AuraRepoAppItem
-@end
-
-@implementation AuraSignEngine
+@implementation AuraSignEngine {
+    NSMutableArray<NSString *> *_guardedBundleIDs;
+}
 
 + (instancetype)sharedEngine {
     static AuraSignEngine *instance = nil;
@@ -114,6 +127,7 @@ typedef struct {
     if (self = [super init]) {
         dlopen("/System/Library/PrivateFrameworks/AuthKit.framework/AuthKit", RTLD_LAZY);
         dlopen("/System/Library/Frameworks/CoreServices.framework/CoreServices", RTLD_LAZY);
+        dlopen("/System/Library/Frameworks/UserNotifications.framework/UserNotifications", RTLD_LAZY);
         [self loadPreferences];
     }
     return self;
@@ -126,9 +140,11 @@ typedef struct {
     _lowBatteryRescueEnabled = dict[@"lowBatteryRescueEnabled"] ? [dict[@"lowBatteryRescueEnabled"] boolValue] : YES;
     _lowBatteryTriggerPercent = dict[@"lowBatteryTriggerPercent"] ? [dict[@"lowBatteryTriggerPercent"] integerValue] : 5;
     _lowBatteryThresholdDays = dict[@"lowBatteryThresholdDays"] ? [dict[@"lowBatteryThresholdDays"] integerValue] : 5;
-    _smartStripExtensions = dict[@"smartStripExtensions"] ? [dict[@"smartStripExtensions"] boolValue] : YES;
     _rebootShieldEnabled = dict[@"rebootShieldEnabled"] ? [dict[@"rebootShieldEnabled"] boolValue] : YES;
-    _liquidGlassTintLevel = dict[@"liquidGlassTintLevel"] ? [dict[@"liquidGlassTintLevel"] floatValue] : 0.25f;
+    _notificationEnabled = dict[@"notificationEnabled"] ? [dict[@"notificationEnabled"] boolValue] : YES;
+    _smartStripExtensions = YES;
+    _liquidGlassTintLevel = 0.25f;
+    _guardedBundleIDs = [dict[@"guardedBundleIDs"] mutableCopy] ?: [NSMutableArray array];
 }
 
 - (void)savePreferences {
@@ -140,11 +156,102 @@ typedef struct {
         @"lowBatteryRescueEnabled": @(_lowBatteryRescueEnabled),
         @"lowBatteryTriggerPercent": @(_lowBatteryTriggerPercent),
         @"lowBatteryThresholdDays": @(_lowBatteryThresholdDays),
-        @"smartStripExtensions": @(_smartStripExtensions),
         @"rebootShieldEnabled": @(_rebootShieldEnabled),
-        @"liquidGlassTintLevel": @(_liquidGlassTintLevel)
+        @"notificationEnabled": @(_notificationEnabled),
+        @"smartStripExtensions": @(YES),
+        @"liquidGlassTintLevel": @(0.25f),
+        @"guardedBundleIDs": _guardedBundleIDs ?: @[]
     };
     [dict writeToFile:AURA_PREFS_PATH atomically:YES];
+}
+
+#pragma mark - 3 槽位自动守护管理
+
+- (BOOL)isBundleIDGuarded:(NSString *)bundleID isLoader:(BOOL)isLoader {
+    if (isLoader) return YES; // 越狱工具强制锁定守护
+    if (!bundleID.length) return NO;
+    return [_guardedBundleIDs containsObject:bundleID];
+}
+
+- (BOOL)toggleGuardForApp:(AuraAppInfo *)app allApps:(NSArray<AuraAppInfo *> *)allApps outError:(NSString **)outError {
+    if (app.isJailbreakLoader) {
+        if (outError) *outError = @"越狱加载器属于最高优先级核心应用，已默认锁定守护！";
+        return NO;
+    }
+    [self loadPreferences];
+    if ([_guardedBundleIDs containsObject:app.bundleID]) {
+        [_guardedBundleIDs removeObject:app.bundleID];
+        app.isGuarded = NO;
+        [self savePreferences];
+        return YES;
+    }
+
+    NSInteger currentGuardedCount = 0;
+    for (AuraAppInfo *item in allApps) {
+        if (item.isJailbreakLoader || [_guardedBundleIDs containsObject:item.bundleID]) {
+            currentGuardedCount++;
+        }
+    }
+    if (currentGuardedCount >= 3) {
+        if (outError) *outError = @"苹果免费个人证书最多同时激活 3 个应用槽位！请先取消其他应用的守护后再勾选。";
+        return NO;
+    }
+    [_guardedBundleIDs addObject:app.bundleID];
+    app.isGuarded = YES;
+    [self savePreferences];
+    return YES;
+}
+
+#pragma mark - iOS 原生系统级通知 (像普通 App 一样顶部弹窗响铃通知)
+
+- (void)requestSystemNotificationPermission {
+    Class centerCls = NSClassFromString(@"UNUserNotificationCenter");
+    if (!centerCls) return;
+    id center = [centerCls currentNotificationCenter];
+    [center setDelegate:self];
+    // UNAuthorizationOptionBadge(1<<0) | UNAuthorizationOptionSound(1<<1) | UNAuthorizationOptionAlert(1<<2) = 7
+    [center requestAuthorizationWithOptions:7 completionHandler:^(BOOL granted, NSError *error) {}];
+}
+
+// 实现 UNUserNotificationCenterDelegate，确保 App 在前台时也能像正常应用一样弹出顶部横幅与响铃
+- (void)userNotificationCenter:(id)center
+       willPresentNotification:(id)notification
+         withCompletionHandler:(void (^)(NSUInteger options))completionHandler {
+    // UNNotificationPresentationOptionBanner(1<<4) | UNNotificationPresentationOptionList(1<<3) | UNNotificationPresentationOptionSound(1<<1) = 0x1A
+    if (completionHandler) completionHandler(0x1A);
+}
+
+- (void)sendSystemNotificationWithTitle:(NSString *)title body:(NSString *)body {
+    [self loadPreferences];
+    if (!_notificationEnabled) return;
+
+    Class centerCls  = NSClassFromString(@"UNUserNotificationCenter");
+    Class contentCls = NSClassFromString(@"UNMutableNotificationContent");
+    Class soundCls   = NSClassFromString(@"UNNotificationSound");
+    Class reqCls     = NSClassFromString(@"UNNotificationRequest");
+    if (!centerCls || !contentCls || !reqCls) return;
+
+    id center = nil;
+    NSString *myBid = [[NSBundle mainBundle] bundleIdentifier];
+    if ([myBid isEqualToString:@"com.aurasign.pro"]) {
+        center = [centerCls currentNotificationCenter];
+        [center setDelegate:self];
+    } else if ([centerCls instancesRespondToSelector:@selector(initWithBundleIdentifier:)]) {
+        // 后台守护进程 aurasignd 或 SpringBoard 代发给 com.aurasign.pro
+        center = [[centerCls alloc] initWithBundleIdentifier:@"com.aurasign.pro"];
+    }
+    if (!center) return;
+
+    id content = [[contentCls alloc] init];
+    [content setTitle:title ?: @"灵签 Pro"];
+    [content setBody:body ?: @""];
+    if (soundCls && [soundCls respondsToSelector:@selector(defaultSound)]) {
+        [content setSound:[soundCls defaultSound]];
+    }
+
+    NSString *reqId = [[NSUUID UUID] UUIDString];
+    id request = [reqCls requestWithIdentifier:reqId content:content trigger:nil];
+    [center addNotificationRequest:request withCompletionHandler:^(NSError *error) {}];
 }
 
 - (NSDictionary<NSString *, NSString *> *)fetchNativeAnisetteHeaders {
@@ -246,6 +353,7 @@ typedef struct {
         item.version = [proxy shortVersionString] ?: @"1.0";
         item.bundlePath = bundlePath;
         item.isJailbreakLoader = (isDopamine || isRelaxin);
+        item.isGuarded = [self isBundleIDGuarded:item.bundleID isLoader:item.isJailbreakLoader];
 
         if (hasProv) {
             NSDate *expDate = [self parseExpirationDateFromProvision:provPath];
@@ -285,6 +393,20 @@ typedef struct {
             [result addObject:item];
         }
     }
+
+    // 首次如果 _guardedBundleIDs 为空，自动守护前 3 个应用
+    if (_guardedBundleIDs.count == 0 && result.count > 0) {
+        NSInteger added = 0;
+        for (AuraAppInfo *item in result) {
+            if (!item.isJailbreakLoader && added < 2) { // 留槽位给 loader
+                [_guardedBundleIDs addObject:item.bundleID];
+                item.isGuarded = YES;
+                added++;
+            }
+        }
+        if (added > 0) [self savePreferences];
+    }
+
     return result;
 }
 
@@ -452,11 +574,7 @@ typedef struct {
     return (entryCount > 0);
 }
 
-- (BOOL)installAndSignIPAFileAtPath:(NSString *)ipaFilePath
-                         customName:(NSString *)customName
-                     customBundleID:(NSString *)customBundleID
-                       injectedDebs:(NSArray<NSString *> *)debOrDylibPaths
-                              error:(NSError **)outError {
+- (BOOL)installAndSignIPAFileAtPath:(NSString *)ipaFilePath error:(NSError **)outError {
     if (![[NSFileManager defaultManager] fileExistsAtPath:ipaFilePath]) {
         if (outError) *outError = [NSError errorWithDomain:@"AuraSign" code:404 userInfo:@{NSLocalizedDescriptionKey: @"找不到待签名的 IPA 安装包文件"}];
         return NO;
@@ -498,19 +616,14 @@ typedef struct {
     tempApp.version = info[@"CFBundleShortVersionString"] ?: @"1.0";
     tempApp.bundlePath = foundAppPath;
     tempApp.isJailbreakLoader = ([tempApp.bundleID.lowercaseString containsString:@"dopamine"] || [tempApp.bundleID.lowercaseString containsString:@"relaxin"]);
+    tempApp.isGuarded = [self isBundleIDGuarded:tempApp.bundleID isLoader:tempApp.isJailbreakLoader];
 
-    BOOL ok = [self fastResignApp:tempApp stripPlugIns:self.smartStripExtensions customName:customName customBundleID:customBundleID injectedDebs:debOrDylibPaths error:outError];
+    BOOL ok = [self fastResignApp:tempApp error:outError];
     [[NSFileManager defaultManager] removeItemAtPath:unzipDir error:nil];
     return ok;
 }
 
-- (BOOL)fastResignApp:(AuraAppInfo *)app
-        stripPlugIns:(BOOL)strip
-          customName:(NSString *)customName
-      customBundleID:(NSString *)customBundleID
-        injectedDebs:(NSArray<NSString *> *)debOrDylibPaths
-               error:(NSError **)outError {
-
+- (BOOL)fastResignApp:(AuraAppInfo *)app error:(NSError **)outError {
     AuraAppleDeveloperAPI *api = [AuraAppleDeveloperAPI sharedAPI];
     if (![api hasValidAccountInKeychain]) {
         if (outError) {
@@ -519,7 +632,7 @@ typedef struct {
         return NO;
     }
 
-    NSString *requestedBundleID = (customBundleID.length && !app.isJailbreakLoader) ? customBundleID : app.bundleID;
+    NSString *requestedBundleID = app.bundleID;
     NSString *resolvedBundleID = requestedBundleID;
     NSData *realProfileData = [api requestReal7DayProvisioningProfileForBundleID:requestedBundleID
                                                                          appName:app.appName
@@ -545,7 +658,7 @@ typedef struct {
 
     [self recursivelyFixInstalldPermissions:stageRoot];
 
-    if (strip && !app.isJailbreakLoader) {
+    if (self.smartStripExtensions && !app.isJailbreakLoader) {
         [[NSFileManager defaultManager] removeItemAtPath:[stagedAppPath stringByAppendingPathComponent:@"PlugIns"] error:nil];
         [[NSFileManager defaultManager] removeItemAtPath:[stagedAppPath stringByAppendingPathComponent:@"Watch"] error:nil];
     }
@@ -553,30 +666,13 @@ typedef struct {
     NSString *infoPlistPath = [stagedAppPath stringByAppendingPathComponent:@"Info.plist"];
     NSMutableDictionary *infoDict = [NSMutableDictionary dictionaryWithContentsOfFile:infoPlistPath];
     if (infoDict) {
-        if (customName.length && !app.isJailbreakLoader) {
-            infoDict[@"CFBundleDisplayName"] = customName;
-        }
         infoDict[@"CFBundleIdentifier"] = resolvedBundleID;
         infoDict[@"UIFileSharingEnabled"] = @YES;
         [infoDict removeObjectForKey:@"MinimumOSVersion"];
         [infoDict writeToFile:infoPlistPath atomically:YES];
     }
 
-    NSMutableArray<NSString *> *dylibRelPaths = [NSMutableArray array];
-    if (debOrDylibPaths.count > 0) {
-        NSString *frameworksDir = [stagedAppPath stringByAppendingPathComponent:@"Frameworks"];
-        [[NSFileManager defaultManager] createDirectoryAtPath:frameworksDir withIntermediateDirectories:YES attributes:nil error:nil];
-        for (NSString *rawPath in debOrDylibPaths) {
-            NSString *actualDylibPath = [api extractDylibFromDebPackage:rawPath];
-            if (actualDylibPath.length && [[NSFileManager defaultManager] fileExistsAtPath:actualDylibPath]) {
-                NSString *dest = [frameworksDir stringByAppendingPathComponent:actualDylibPath.lastPathComponent];
-                [[NSFileManager defaultManager] copyItemAtPath:actualDylibPath toPath:dest error:nil];
-                [dylibRelPaths addObject:[@"@executable_path/Frameworks/" stringByAppendingString:actualDylibPath.lastPathComponent]];
-            }
-        }
-    }
-
-    BOOL zsignOK = [api performRealZSignOnAppBundle:stagedAppPath profileData:realProfileData injectedDylibs:dylibRelPaths error:outError];
+    BOOL zsignOK = [api performRealZSignOnAppBundle:stagedAppPath profileData:realProfileData error:outError];
     if (!zsignOK) {
         [[NSFileManager defaultManager] removeItemAtPath:stageRoot error:nil];
         NSString *errMsg = (outError && *outError) ? (*outError).localizedDescription : @"zsign 二进制签名未通过";
@@ -633,14 +729,19 @@ typedef struct {
         return NO;
     }
 
-    [self appendTimelineLog:[NSString stringWithFormat:@"🎉 [RESIGN-SUCCESS] 【%@】已成功签入 7 天苹果真证书并完成安装！(BundleID:%@)", app.appName, resolvedBundleID] success:YES];
-    return YES;
-}
+    // 当重签后的 resolvedBundleID 与原 app.bundleID 不同时，若原 app.bundleID 在 _guardedBundleIDs 中，自动将 resolvedBundleID 也加入 _guardedBundleIDs
+    if (![resolvedBundleID isEqualToString:app.bundleID] && [_guardedBundleIDs containsObject:app.bundleID]) {
+        if (![_guardedBundleIDs containsObject:resolvedBundleID]) {
+            [_guardedBundleIDs addObject:resolvedBundleID];
+            [self savePreferences];
+        }
+    }
 
-- (void)downloadAndSignRepoItem:(AuraRepoAppItem *)item
-                       progress:(void(^)(NSString *stageText))progressBlock
-                     completion:(void(^)(BOOL success, NSString *message))completion {
-    if (completion) completion(NO, @"商店模块已移除");
+    [self appendTimelineLog:[NSString stringWithFormat:@"🎉 [RESIGN-SUCCESS] 【%@】已成功签入 7 天苹果真证书并完成安装！(BundleID:%@)", app.appName, resolvedBundleID] success:YES];
+
+    [self sendSystemNotificationWithTitle:@"✅ 灵签 Pro · 签名完成"
+                                     body:[NSString stringWithFormat:@"【%@】已签入满血 7 天苹果真证书并通过未越狱开机校验！", app.appName]];
+    return YES;
 }
 
 - (void)performEmergencyResignAllWithCompletion:(void(^)(BOOL success, NSString *message))completion {
@@ -653,8 +754,10 @@ typedef struct {
         NSInteger successCount = 0;
         NSString *lastErr = nil;
         for (AuraAppInfo *app in apps) {
+            if (!app.isGuarded && !app.isJailbreakLoader) continue;
+
             NSError *err = nil;
-            if ([self fastResignApp:app stripPlugIns:self.smartStripExtensions customName:nil customBundleID:nil injectedDebs:nil error:&err]) {
+            if ([self fastResignApp:app error:&err]) {
                 successCount++;
             } else {
                 lastErr = err.localizedDescription;
@@ -662,24 +765,12 @@ typedef struct {
         }
         dispatch_async(dispatch_get_main_queue(), ^{
             if (successCount > 0) {
-                if (completion) completion(YES, [NSString stringWithFormat:@"✅ 已成功为 %ld 款应用刷新满血 7 天苹果真证书！", (long)successCount]);
+                if (completion) completion(YES, [NSString stringWithFormat:@"✅ 已成功为 %ld 款已守护应用刷新满血 7 天苹果真证书！", (long)successCount]);
             } else {
-                if (completion) completion(NO, lastErr ?: @"没有可续签的应用或签名失败");
+                if (completion) completion(NO, lastErr ?: @"没有需要续签的已守护应用或签名失败");
             }
         });
     });
-}
-
-- (NSString *)accelerateURLForMainlandChina:(NSString *)originalURL {
-    return originalURL ?: @"";
-}
-
-- (NSArray<AuraRepoAppItem *> *)loadBuiltInStoreCatalog {
-    return @[];
-}
-
-- (void)addCustomRepoFromURL:(NSString *)repoURLString completion:(void(^)(BOOL success, NSInteger addedCount, NSString *errorMsg))completion {
-    if (completion) completion(NO, 0, nil);
 }
 
 #pragma mark - 深度诊断日志系统

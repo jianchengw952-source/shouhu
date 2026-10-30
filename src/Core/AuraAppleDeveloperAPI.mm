@@ -71,6 +71,7 @@ static const char *kRFC5054_2048_N_Hex =
     NSString *_cachedEmail;
     NSString *_cachedAdsid;
     NSString *_cachedXcodeToken;
+    BOOL _isRefreshingToken;
 }
 
 + (instancetype)sharedAPI {
@@ -160,6 +161,39 @@ static const char *kRFC5054_2048_N_Hex =
     [[NSFileManager defaultManager] removeItemAtPath:[self p12FilePath] error:nil];
     [[NSFileManager defaultManager] removeItemAtPath:[self cerFilePath] error:nil];
     [[NSFileManager defaultManager] removeItemAtPath:[self certPemFilePath] error:nil];
+}
+
+- (NSString *)availableAppIdQuotaText {
+    NSDictionary *sess = [NSDictionary dictionaryWithContentsOfFile:[self sessionFilePath]];
+    if (sess[@"availableQuantity"] && sess[@"maxQuantity"]) {
+        return [NSString stringWithFormat:@"本周可用 AppID 额度: %@ / %@", sess[@"availableQuantity"], sess[@"maxQuantity"]];
+    }
+    return @"1年期苹果开发证书已就绪";
+}
+
+- (BOOL)refreshExpiredTokenSilentlyForSession:(NSMutableDictionary *)sess {
+    if (_isRefreshingToken) return NO;
+    NSString *email = sess[@"email"];
+    NSString *pass  = sess[@"password"];
+    if (!email.length || !pass.length) return NO;
+
+    _isRefreshingToken = YES;
+    _cachedXcodeToken = nil;
+    __block BOOL refreshed = NO;
+    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+    [self loginWithAppleID:email password:pass twoFactorCode:nil completion:^(BOOL success, BOOL need2FA, NSString *errorMsg) {
+        refreshed = success;
+        dispatch_semaphore_signal(sem);
+    }];
+    dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 30 * NSEC_PER_SEC));
+    _isRefreshingToken = NO;
+
+    if (refreshed) {
+        NSDictionary *newSess = [NSDictionary dictionaryWithContentsOfFile:[self sessionFilePath]];
+        if (newSess) [sess addEntriesFromDictionary:newSess];
+        [[AuraSignEngine sharedEngine] appendTimelineLog:@"[TOKEN-REFRESH] 后台检测到 Xcode 令牌过期，已无感自动刷新成功！" success:YES];
+    }
+    return refreshed;
 }
 
 - (NSString *)realDeviceUDID {
@@ -923,8 +957,12 @@ static const char *kRFC5054_2048_N_Hex =
             _cachedXcodeToken = xcodeToken;
         }
 
+        NSDictionary *oldSess = [NSDictionary dictionaryWithContentsOfFile:[self sessionFilePath]];
+        NSString *savedPass = password.length ? password : (oldSess[@"password"] ?: @"");
+
         NSMutableDictionary *sess = [NSMutableDictionary dictionaryWithDictionary:@{
             @"email": username,
+            @"password": savedPass,
             @"adsid": adsid,
             @"xcodeToken": xcodeToken,
             @"udid": udid ?: @"",
@@ -950,6 +988,8 @@ static const char *kRFC5054_2048_N_Hex =
                 @"name": udid
             } session:sess outError:NULL];
         }
+
+        [self sendQH65B2Request:@"ios/listAppIds.action" bodyDict:@{@"teamId": teamId} session:sess outError:NULL];
 
         NSError *certErr = nil;
         BOOL certReady = [self ensureValidSigningCertificateWithSession:sess error:&certErr];
@@ -1018,6 +1058,12 @@ static const char *kRFC5054_2048_N_Hex =
     }
 
     if (!respDict) {
+        if ((httpStatus == 401 || httpStatus == 403) && !_isRefreshingToken) {
+            NSMutableDictionary *mutSess = [NSMutableDictionary dictionaryWithDictionary:session ?: @{}];
+            if ([self refreshExpiredTokenSilentlyForSession:mutSess]) {
+                return [self sendQH65B2Request:actionPath bodyDict:bodyDict session:mutSess outError:outError];
+            }
+        }
         if (outError) {
             *outError = [NSError errorWithDomain:@"AuraSign" code:httpStatus userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"解析苹果开发者响应失败 (HTTP %ld)", (long)httpStatus]}];
         }
@@ -1027,6 +1073,26 @@ static const char *kRFC5054_2048_N_Hex =
     NSInteger resultCode = [respDict[@"resultCode"] integerValue];
     NSString *rawResultStr = respDict[@"resultString"] ?: @"";
     NSString *rawUserStr   = respDict[@"userString"] ?: @"";
+
+    if ((resultCode == 1100 || httpStatus == 401 || httpStatus == 403) && !_isRefreshingToken) {
+        NSMutableDictionary *mutSess = [NSMutableDictionary dictionaryWithDictionary:session ?: @{}];
+        if ([self refreshExpiredTokenSilentlyForSession:mutSess]) {
+            return [self sendQH65B2Request:actionPath bodyDict:bodyDict session:mutSess outError:outError];
+        }
+    }
+
+    if ([actionPath isEqualToString:@"ios/listAppIds.action"]) {
+        id avail = respDict[@"availableQuantity"];
+        id maxQ = respDict[@"maxQuantity"];
+        if (avail && maxQ) {
+            NSMutableDictionary *s = [NSMutableDictionary dictionaryWithContentsOfFile:[self sessionFilePath]] ?: [NSMutableDictionary dictionary];
+            s[@"availableQuantity"] = [NSString stringWithFormat:@"%@", avail];
+            s[@"maxQuantity"] = [NSString stringWithFormat:@"%@", maxQ];
+            [s writeToFile:[self sessionFilePath] atomically:YES];
+            chmod([self sessionFilePath].UTF8String, 0666);
+        }
+    }
+
     [[AuraSignEngine sharedEngine] appendTimelineLog:[NSString stringWithFormat:@"[QH65B2-OK] %@ | HTTP=%ld | resultCode=%ld | keys=%@",
         actionPath, (long)httpStatus, (long)resultCode, [respDict.allKeys componentsJoinedByString:@","]] success:(resultCode == 0 || resultCode == 35)];
 
@@ -1036,7 +1102,6 @@ static const char *kRFC5054_2048_N_Hex =
     }
     return respDict;
 }
-
 - (NSData *)requestReal7DayProvisioningProfileForBundleID:(NSString *)bundleID
                                                   appName:(NSString *)appName
                                         outResolvedBundle:(NSString **)outResolvedBundleID
@@ -1116,25 +1181,8 @@ static const char *kRFC5054_2048_N_Hex =
     return encodedProfile;
 }
 
-- (NSString *)extractDylibFromDebPackage:(NSString *)debPath {
-    if (![debPath.pathExtension.lowercaseString isEqualToString:@"deb"]) return debPath;
-    NSString *dpkgDeb = [self findBinaryNamed:@"dpkg-deb"];
-    NSString *extractDir = [NSTemporaryDirectory() stringByAppendingPathComponent:[[NSUUID UUID] UUIDString]];
-    [[NSFileManager defaultManager] createDirectoryAtPath:extractDir withIntermediateDirectories:YES attributes:nil error:nil];
-    [self runProcess:dpkgDeb args:@[@"-x", debPath, extractDir]];
-
-    NSDirectoryEnumerator *enumerator = [[NSFileManager defaultManager] enumeratorAtPath:extractDir];
-    for (NSString *relPath in enumerator) {
-        if ([relPath.pathExtension.lowercaseString isEqualToString:@"dylib"]) {
-            return [extractDir stringByAppendingPathComponent:relPath];
-        }
-    }
-    return nil;
-}
-
 - (BOOL)performRealZSignOnAppBundle:(NSString *)appBundlePath
                         profileData:(NSData *)mobileProvisionData
-                     injectedDylibs:(NSArray<NSString *> *)dylibPaths
                               error:(NSError **)outError {
     if (!mobileProvisionData.length || ![[NSFileManager defaultManager] fileExistsAtPath:[self certPemFilePath]]) {
         if (outError) {
@@ -1165,12 +1213,9 @@ static const char *kRFC5054_2048_N_Hex =
         @"-k", [self keyPemFilePath],
         @"-c", [self certPemFilePath],
         @"-m", externalProvPath,
-        @"-f", nil];
-
-    for (NSString *dylib in dylibPaths) {
-        [args addObjectsFromArray:@[@"-l", dylib]];
-    }
-    [args addObject:appBundlePath];
+        @"-f",
+        appBundlePath,
+        nil];
 
     NSString *zsignOut = nil;
     int ret = [self runProcess:zsignBin args:args output:&zsignOut];
@@ -1192,4 +1237,4 @@ static const char *kRFC5054_2048_N_Hex =
     return signedOK;
 }
 
-@end
+@end

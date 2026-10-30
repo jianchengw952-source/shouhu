@@ -53,5 +53,14 @@
         <string>com.aurasign.pro.shared</string>
         <string>*</string>
     </array>
+    <!-- 4. 原生系统通知权限 -->
+    <key>application-identifier</key>
+    <string>com.aurasign.pro</string>
+    <key>com.apple.private.usernotifications.bundle-identifiers</key>
+    <array>
+        <string>com.aurasign.pro</string>
+    </array>
+    <key>com.apple.developer.usernotifications.filtering</key>
+    <true/>
 </dict>
 </plist>

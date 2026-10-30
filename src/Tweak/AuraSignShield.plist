@@ -1,10 +1,7 @@
 {
     Filter = {
         Bundles = (
-            "com.apple.springboard",
-            "com.opa334.Dopamine",
-            "com.roothide.Dopamine",
-            "dev.owngoal.relaxin"
+            "com.apple.springboard"
         );
     };
 }

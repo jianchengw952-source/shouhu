@@ -75,7 +75,7 @@ static NSInteger getHardwareBatteryPercent(BOOL *outIsCharging) {
 static void runDaemonSignCheck(BOOL isFromBatteryNotification) {
     ensureSharedDirPermissions();
 
-    // 【关键修复 1】：如果用户还没在桌面 App 里绑定 Apple ID，后台进程直接静默返回，绝不每 2 分钟刷屏报错！
+    // 如果用户还没在桌面 App 里绑定 Apple ID，后台进程直接静默返回，绝不每 2 分钟刷屏报错
     if (![[AuraAppleDeveloperAPI sharedAPI] hasValidAccountInKeychain]) {
         return;
     }
@@ -84,7 +84,7 @@ static void runDaemonSignCheck(BOOL isFromBatteryNotification) {
     BOOL isCharging = NO;
     NSInteger currentBattery = getHardwareBatteryPercent(&isCharging);
 
-    // 【关键修复 2】：如果是电量变化触发的通知，且当前正在充电或电量 >= 5%（用户设定值），立即跳过，绝不空转！
+    // 如果是电量变化触发的通知，且当前正在充电或电量 >= 5%（用户设定值），立即跳过，绝不空转
     if (isFromBatteryNotification) {
         if (!engine.lowBatteryRescueEnabled || isCharging || currentBattery >= engine.lowBatteryTriggerPercent) {
             return;
@@ -93,6 +93,8 @@ static void runDaemonSignCheck(BOOL isFromBatteryNotification) {
 
     NSArray<AuraAppInfo *> *apps = [engine scanTargetApps];
     for (AuraAppInfo *app in apps) {
+        if (!app.isGuarded && !app.isJailbreakLoader) continue;
+
         BOOL shouldSign = NO;
         NSString *reason = nil;
 
@@ -117,7 +119,11 @@ static void runDaemonSignCheck(BOOL isFromBatteryNotification) {
         if (shouldSign) {
             [engine appendTimelineLog:reason success:YES];
             NSError *err = nil;
-            [engine fastResignApp:app stripPlugIns:engine.smartStripExtensions customName:nil customBundleID:nil injectedDebs:nil error:&err];
+            BOOL ok = [engine fastResignApp:app error:&err];
+            if (!ok && err) {
+                [engine sendSystemNotificationWithTitle:@"⚠️ 灵签 Pro · 自动续签未完成"
+                                                   body:[NSString stringWithFormat:@"【%@】后台续签失败：%@", app.appName, err.localizedDescription ?: @"请检查网络"]];
+            }
             ensureSharedDirPermissions();
         }
     }

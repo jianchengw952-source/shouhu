@@ -1,6 +1,5 @@
 #import <UIKit/UIKit.h>
 #import "AuraSignEngine.h"
-#import "AuraLiquidGlassView.h"
 
 @interface SBPowerDownViewController : UIViewController
 @end
@@ -15,16 +14,35 @@
     NSString *summary = nil;
     AuraShieldStatus status = [engine evaluateGlobalShieldStatus:&summary];
     if (status == AuraShieldStatusDanger) {
+        UIViewController *hostVC = (UIViewController *)self;
         UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"🛑 越狱防失联安全拦截"
-                                                                       message:@"检测到您的【Dopamine / Relaxin】苹果证书已过期或属于假签名！\n\n如果现在关机或重启，开机后将无法点开越狱工具！"
+                                                                       message:@"检测到您的【Dopamine / Relaxin】苹果证书已过期或属于假签名！\n\n如果现在关机或重启，开机后将无法打开越狱工具！"
                                                                 preferredStyle:UIAlertControllerStyleAlert];
 
-        [alert addAction:[UIAlertAction actionWithTitle:@"⚡ 立即 1.5秒自动续签并安全重启 (推荐)"
+        [alert addAction:[UIAlertAction actionWithTitle:@"⚡ 立即自动续签并解除拦截 (推荐)"
                                                   style:UIAlertActionStyleDefault
                                                 handler:^(UIAlertAction * _Nonnull action) {
-            [[AuraSignEngine sharedEngine] performEmergencyResignAllWithCompletion:^(BOOL success, NSString *message) {
-                UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleHeavy];
-                [gen impactOccurred];
+            UIAlertController *progressAlert = [UIAlertController alertControllerWithTitle:@"⏳ 正在极速续签..."
+                                                                                   message:@"正在连接苹果服务器签发 7 天真证书并校验 libmis，请稍候..."
+                                                                            preferredStyle:UIAlertControllerStyleAlert];
+            [hostVC presentViewController:progressAlert animated:YES completion:^{
+                [[AuraSignEngine sharedEngine] performEmergencyResignAllWithCompletion:^(BOOL success, NSString *message) {
+                    [progressAlert dismissViewControllerAnimated:YES completion:^{
+                        UINotificationFeedbackGenerator *gen = [[UINotificationFeedbackGenerator alloc] init];
+                        [gen notificationOccurred:success ? UINotificationFeedbackTypeSuccess : UINotificationFeedbackTypeError];
+
+                        NSString *resTitle = success ? @"✅ 续签成功 · 可安全关机" : @"❌ 续签失败 · 切勿关机！";
+                        NSString *resMsg = success
+                            ? @"越狱工具已签入满血 7 天苹果真证书并通过未越狱开机校验，您现在可以放心拉动滑块关机或重启！"
+                            : [NSString stringWithFormat:@"原因：%@\n\n请先取消关机，连接网络后打开「灵签 Pro」修复后再重启！", message ?: @"网络异常"];
+
+                        UIAlertController *resAlert = [UIAlertController alertControllerWithTitle:resTitle
+                                                                                          message:resMsg
+                                                                                   preferredStyle:UIAlertControllerStyleAlert];
+                        [resAlert addAction:[UIAlertAction actionWithTitle:@"知道了" style:UIAlertActionStyleCancel handler:nil]];
+                        [hostVC presentViewController:resAlert animated:YES completion:nil];
+                    }];
+                }];
             }];
         }]];
 
@@ -32,44 +50,8 @@
                                                   style:UIAlertActionStyleCancel
                                                 handler:nil]];
 
-        [(UIViewController *)self presentViewController:alert animated:YES completion:nil];
+        [hostVC presentViewController:alert animated:YES completion:nil];
     }
-}
-
-%end
-
-%hook UIViewController
-
-- (void)viewDidAppear:(BOOL)animated {
-    %orig;
-    NSString *bid = [[NSBundle mainBundle] bundleIdentifier] ?: @"";
-    BOOL isTargetLoader = ([bid.lowercaseString containsString:@"dopamine"] || [bid.lowercaseString containsString:@"relaxin"]);
-    if (!isTargetLoader) return;
-
-    UIViewController *selfVC = (UIViewController *)self;
-    if (selfVC.parentViewController != nil && ![selfVC isKindOfClass:[UINavigationController class]]) return;
-    if ([selfVC.view viewWithTag:992701]) return;
-
-    NSString *summary = nil;
-    AuraShieldStatus status = [[AuraSignEngine sharedEngine] evaluateGlobalShieldStatus:&summary];
-
-    CGFloat width = selfVC.view.bounds.size.width - 36.0;
-    AuraLiquidGlassView *capsule = [[AuraLiquidGlassView alloc] initWithFrame:CGRectMake(18.0, selfVC.view.bounds.size.height - 86.0, width, 44.0) cornerRadius:22.0];
-    capsule.tag = 992701;
-    capsule.accentGlowColor = (status == AuraShieldStatusDanger)
-        ? [UIColor colorWithRed:0.75 green:0.12 blue:0.18 alpha:1.0]
-        : [UIColor colorWithRed:0.06 green:0.52 blue:0.38 alpha:1.0];
-
-    UILabel *lbl = [[UILabel alloc] initWithFrame:CGRectMake(16, 0, width - 32, 44)];
-    lbl.font = [UIFont systemFontOfSize:12.5 weight:UIFontWeightSemibold];
-    lbl.textColor = [UIColor whiteColor];
-    lbl.textAlignment = NSTextAlignmentCenter;
-    lbl.text = (status == AuraShieldStatusDanger)
-        ? @"🔴 警告：当前为假签名或已过期 · 请打开灵签Pro一键转正"
-        : @"🛡️ 灵签守护中 · 苹果7天真证书有效 (libmis 已校验)";
-    [capsule addSubview:lbl];
-
-    [selfVC.view addSubview:capsule];
 }
 
 %end
