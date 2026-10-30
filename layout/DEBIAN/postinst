@@ -2,10 +2,20 @@
 set -e
 
 JBROOT=""
-if [ -d "/var/jb" ]; then
-    JBROOT="/var/jb"
-else
-    JBROOT=$(find /var/containers/Bundle/Application/ -maxdepth 1 -name ".jbroot-*" 2>/dev/null | head -n 1)
+# 1. 优先从 postinst 脚本自身路径 ($0) 推导当前越狱根目录 (同时支持 Relaxin .jbroot-* 与 Dopamine /var/jb)
+case "$0" in
+    */Library/dpkg/info/*)
+        JBROOT="${0%/Library/dpkg/info/*}"
+        ;;
+esac
+
+# 2. 若未推导出来，保持原有判断逻辑
+if [ -z "$JBROOT" ] || [ ! -d "$JBROOT" ]; then
+    if [ -d "/var/jb" ]; then
+        JBROOT="/var/jb"
+    else
+        JBROOT=$(find /var/containers/Bundle/Application/ -maxdepth 1 -name ".jbroot-*" 2>/dev/null | head -n 1)
+    fi
 fi
 
 if [ -n "$JBROOT" ]; then
@@ -117,8 +127,14 @@ EOF
 
     chown root:wheel "$PLIST" 2>/dev/null || true
     chmod 644 "$PLIST" 2>/dev/null || true
-    "$JBROOT/bin/launchctl" unload "$PLIST" 2>/dev/null || launchctl unload "$PLIST" 2>/dev/null || true
-    "$JBROOT/bin/launchctl" load -w "$PLIST" 2>/dev/null || launchctl load -w "$PLIST" 2>/dev/null || true
+    LAUNCHCTL_BIN="launchctl"
+    if [ -x "$JBROOT/bin/launchctl" ]; then
+        LAUNCHCTL_BIN="$JBROOT/bin/launchctl"
+    elif [ -x "$JBROOT/usr/bin/launchctl" ]; then
+        LAUNCHCTL_BIN="$JBROOT/usr/bin/launchctl"
+    fi
+    "$LAUNCHCTL_BIN" unload "$PLIST" 2>/dev/null || true
+    "$LAUNCHCTL_BIN" load -w "$PLIST" 2>/dev/null || true
 fi
 
 exit 0

@@ -223,6 +223,8 @@ static const char *kRFC5054_2048_N_Hex =
     if ([[NSFileManager defaultManager] fileExistsAtPath:p1]) return p1;
     NSString *p2 = [@"/var/jb/usr/bin/" stringByAppendingString:name];
     if ([[NSFileManager defaultManager] fileExistsAtPath:p2]) return p2;
+    NSString *p3 = AURA_NS_JBROOT([@"/Applications/AuraSignPro.app/" stringByAppendingString:name]);
+    if ([[NSFileManager defaultManager] fileExistsAtPath:p3]) return p3;
     return [@"/usr/bin/" stringByAppendingString:name];
 }
 

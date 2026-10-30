@@ -51,7 +51,7 @@ extern char **environ;
 
 @interface NSObject (AuraDynamicGlassView)
 - (instancetype)initWithFrame:(CGRect)frame cornerRadius:(CGFloat)radius;
-- (void)setTintLevel:(float)level;
+- (void)setTintLevel:(CGFloat)level;
 - (void)setAccentGlowColor:(UIColor *)color;
 @end
 
@@ -462,7 +462,7 @@ static UIWindow *gInAppBannerWindow = nil;
             UIView *pill = nil;
             if (glassCls) {
                 pill = [(id)[glassCls alloc] initWithFrame:CGRectMake(0, 0, bannerW, bannerH) cornerRadius:24.0];
-                ((void (*)(id, SEL, float))objc_msgSend)(pill, sel_registerName("setTintLevel:"), 0.38f);
+                ((void (*)(id, SEL, CGFloat))objc_msgSend)(pill, sel_registerName("setTintLevel:"), (CGFloat)0.38);
                 ((void (*)(id, SEL, id))objc_msgSend)(pill, sel_registerName("setAccentGlowColor:"), [UIColor colorWithRed:0.08 green:0.38 blue:0.28 alpha:1.0]);
             } else {
                 pill = [[UIView alloc] initWithFrame:CGRectMake(0, 0, bannerW, bannerH)];
