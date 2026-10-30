@@ -1,4 +1,4 @@
-// src/Core/AuraAppleDeveloperAPI.mm (新增 parseApplePlistDataSafely 自动修复苹果服务器中文姓名 non-utf8 编码问题终极版)
+// src/Core/AuraAppleDeveloperAPI.mm (补齐 submitDevelopmentCSR 后从 listAllDevelopmentCerts/downloadDevelopmentCert 提取真 .cer 闭环终极版)
 #import <CoreFoundation/CoreFoundation.h>
 #import <UIKit/UIKit.h>
 #import <CommonCrypto/CommonDigest.h>
@@ -121,12 +121,19 @@ static const char *kRFC5054_2048_N_Hex =
     return [[self keychainDir] stringByAppendingPathComponent:@"dev_cert_1year.p12"];
 }
 
+- (NSString *)cerFilePath {
+    return [[self keychainDir] stringByAppendingPathComponent:@"apple_dev.cer"];
+}
+
+- (NSString *)keyPemFilePath {
+    return [[self keychainDir] stringByAppendingPathComponent:@"dev_key.pem"];
+}
+
 - (BOOL)hasValidAccountInKeychain {
     NSDictionary *sess = [NSDictionary dictionaryWithContentsOfFile:[self sessionFilePath]];
-    return (sess != nil &&
-            [sess[@"teamId"] length] > 0 &&
-            [sess[@"adsid"] length] > 0 &&
-            [[NSFileManager defaultManager] fileExistsAtPath:[self p12FilePath]]);
+    BOOL hasCert = ([[NSFileManager defaultManager] fileExistsAtPath:[self cerFilePath]] &&
+                    [[NSFileManager defaultManager] fileExistsAtPath:[self keyPemFilePath]]);
+    return (sess != nil && [sess[@"teamId"] length] > 0 && [sess[@"adsid"] length] > 0 && hasCert);
 }
 
 - (NSString *)currentAppleIDEmail {
@@ -148,6 +155,7 @@ static const char *kRFC5054_2048_N_Hex =
     _cachedXcodeToken = nil;
     [[NSFileManager defaultManager] removeItemAtPath:[self sessionFilePath] error:nil];
     [[NSFileManager defaultManager] removeItemAtPath:[self p12FilePath] error:nil];
+    [[NSFileManager defaultManager] removeItemAtPath:[self cerFilePath] error:nil];
 }
 
 - (NSString *)realDeviceUDID {
@@ -236,18 +244,14 @@ static const char *kRFC5054_2048_N_Hex =
     return respData;
 }
 
-#pragma mark - 【核心突破】：安全解析包含中文非 UTF-8 字节的苹果 XML Plist 响应！
-
 - (NSDictionary *)parseApplePlistDataSafely:(NSData *)rawData {
     if (!rawData.length) return nil;
 
-    // 1. 先尝试标准 UTF-8 Plist 解析
     id obj = [NSPropertyListSerialization propertyListWithData:rawData options:0 format:NULL error:NULL];
     if ([obj isKindOfClass:[NSDictionary class]]) {
         return (NSDictionary *)obj;
     }
 
-    // 2. 若因中文姓名导致 non-utf8，使用 ISO-Latin1 无损读取并转为合法 UTF-8 后再解析！
     NSString *latin1Str = [[NSString alloc] initWithData:rawData encoding:NSISOLatin1StringEncoding];
     if (latin1Str.length) {
         NSData *utf8FixedData = [latin1Str dataUsingEncoding:NSUTF8StringEncoding];
@@ -259,7 +263,6 @@ static const char *kRFC5054_2048_N_Hex =
         }
     }
 
-    // 3. 终极兜底：将所有非 ASCII 字节 (>= 0x80) 替换为 '_'，100% 保留 XML 标签、teamId、appIdId 与 Base64 证书数据！
     NSMutableData *asciiClean = [NSMutableData dataWithData:rawData];
     unsigned char *bytes = (unsigned char *)asciiClean.mutableBytes;
     for (NSUInteger i = 0; i < asciiClean.length; i++) {
@@ -482,7 +485,31 @@ static const char *kRFC5054_2048_N_Hex =
     return (ec == 0);
 }
 
-#pragma mark - 完整 GSA SRP6a 握手 + 缓存 196字节 Xcode 令牌 + 请求 /services/QH65B2/
+#pragma mark - 【核心突破】：从 listAllDevelopmentCerts / downloadDevelopmentCert 提取已签发的真 .cer 数据！
+
+- (NSData *)fetchIssuedCertificateDataForTeam:(NSString *)teamId session:(NSDictionary *)sess {
+    // 1. 先从 listAllDevelopmentCerts.action 提取 certificates[0][@"certContent"]
+    NSDictionary *listCerts = [self sendQH65B2Request:@"ios/listAllDevelopmentCerts.action" bodyDict:@{@"teamId": teamId} session:sess outError:NULL];
+    NSArray *certs = listCerts[@"certificates"];
+    if ([certs isKindOfClass:[NSArray class]] && certs.count > 0) {
+        for (NSDictionary *c in certs) {
+            if ([c[@"certContent"] isKindOfClass:[NSData class]] && [c[@"certContent"] length] > 0) {
+                return c[@"certContent"];
+            }
+        }
+    }
+    // 2. 备选：从 downloadDevelopmentCert.action 提取 certificate[@"certContent"]
+    NSDictionary *dlCert = [self sendQH65B2Request:@"ios/downloadDevelopmentCert.action" bodyDict:@{@"teamId": teamId} session:sess outError:NULL];
+    if ([dlCert[@"certificate"] isKindOfClass:[NSDictionary class]]) {
+        NSData *content = dlCert[@"certificate"][@"certContent"];
+        if ([content isKindOfClass:[NSData class]] && content.length > 0) {
+            return content;
+        }
+    }
+    return nil;
+}
+
+#pragma mark - 完整 GSA SRP6a 握手 + 签发并下载 1 年期 .cer 真证书
 
 - (void)loginWithAppleID:(NSString *)email
                 password:(NSString *)password
@@ -776,7 +803,7 @@ static const char *kRFC5054_2048_N_Hex =
             _cachedXcodeToken = xcodeToken;
         }
 
-        // ==================== Step 4: 用真正的 com.apple.gs.xcode.auth 令牌请求 /services/QH65B2/ ====================
+        // ==================== Step 4: 请求 /services/QH65B2/ 并下载签发好的 .cer 证书 ====================
         NSMutableDictionary *sess = [NSMutableDictionary dictionaryWithDictionary:@{
             @"email": username,
             @"adsid": adsid,
@@ -790,7 +817,7 @@ static const char *kRFC5054_2048_N_Hex =
         NSArray *teams = teamsResp[@"teams"];
         if (![teams isKindOfClass:[NSArray class]] || teams.count == 0) {
             dispatch_async(dispatch_get_main_queue(), ^{
-                if (completion) completion(NO, NO, stepErr.localizedDescription ?: @"获取个人开发者 TeamID 失败，请复制日志查看详情");
+                if (completion) completion(NO, NO, stepErr.localizedDescription ?: @"获取个人开发者 TeamID 失败");
             });
             return;
         }
@@ -798,54 +825,62 @@ static const char *kRFC5054_2048_N_Hex =
         sess[@"teamId"] = teamId;
 
         if (udid.length) {
+            // resultCode == 0 (新增成功) 或 resultCode == 35 (UDID已存在) 均为正常！
             [self sendQH65B2Request:@"ios/addDevice.action" bodyDict:@{
                 @"teamId": teamId,
                 @"deviceNumber": udid,
-                @"name": @"iPhone"
+                @"name": udid
             } session:sess outError:NULL];
         }
 
+        // 确保本地私钥已存在
         NSString *csrContent = [self generatePrivateKeyAndCSRPEMForEmail:username];
-        NSError *csrErr = nil;
-        NSDictionary *certResp = [self sendQH65B2Request:@"ios/submitDevelopmentCSR.action" bodyDict:@{
-            @"teamId": teamId,
-            @"csrContent": csrContent,
-            @"machineId": [[NSUUID UUID] UUIDString],
-            @"machineName": @"AuraSignPro"
-        } session:sess outError:&csrErr];
 
-        NSData *derCert = certResp[@"certRequest"][@"certificate"][@"certContent"];
+        // 先检查刚才 12:22:08 苹果是否已经签发好证书，若后台已有证书则直接下载复用！
+        NSData *derCert = [self fetchIssuedCertificateDataForTeam:teamId session:sess];
 
-        if (!derCert && csrErr.code == 7460) {
-            NSDictionary *listCerts = [self sendQH65B2Request:@"ios/listAllDevelopmentCerts.action" bodyDict:@{@"teamId": teamId} session:sess outError:NULL];
-            NSArray *certs = listCerts[@"certificates"];
-            if ([certs isKindOfClass:[NSArray class]]) {
-                for (NSDictionary *c in certs) {
-                    NSString *serial = c[@"serialNumber"];
-                    if (serial.length) {
-                        [self sendQH65B2Request:@"ios/revokeDevelopmentCert.action" bodyDict:@{@"teamId": teamId, @"serialNumber": serial} session:sess outError:NULL];
-                    }
-                }
-            }
-            certResp = [self sendQH65B2Request:@"ios/submitDevelopmentCSR.action" bodyDict:@{
+        if (!derCert || derCert.length == 0) {
+            NSError *csrErr = nil;
+            [self sendQH65B2Request:@"ios/submitDevelopmentCSR.action" bodyDict:@{
                 @"teamId": teamId,
                 @"csrContent": csrContent,
                 @"machineId": [[NSUUID UUID] UUIDString],
                 @"machineName": @"AuraSignPro"
             } session:sess outError:&csrErr];
-            derCert = certResp[@"certRequest"][@"certificate"][@"certContent"];
+
+            if (csrErr.code == 7460) {
+                NSDictionary *listCerts = [self sendQH65B2Request:@"ios/listAllDevelopmentCerts.action" bodyDict:@{@"teamId": teamId} session:sess outError:NULL];
+                NSArray *certs = listCerts[@"certificates"];
+                if ([certs isKindOfClass:[NSArray class]]) {
+                    for (NSDictionary *c in certs) {
+                        NSString *serial = c[@"serialNumber"];
+                        if (serial.length) {
+                            [self sendQH65B2Request:@"ios/revokeDevelopmentCert.action" bodyDict:@{@"teamId": teamId, @"serialNumber": serial} session:sess outError:NULL];
+                        }
+                    }
+                }
+                [self sendQH65B2Request:@"ios/submitDevelopmentCSR.action" bodyDict:@{
+                    @"teamId": teamId,
+                    @"csrContent": csrContent,
+                    @"machineId": [[NSUUID UUID] UUIDString],
+                    @"machineName": @"AuraSignPro"
+                } session:sess outError:&csrErr];
+            }
+
+            // 【关键修复】：CSR 提交成功后，调用 fetchIssuedCertificateDataForTeam 下载真正的 .cer 证书字节！
+            derCert = [self fetchIssuedCertificateDataForTeam:teamId session:sess];
         }
 
-        BOOL p12OK = [self exportRealAppleDERCertToP12:derCert];
-        if (!p12OK && ![[NSFileManager defaultManager] fileExistsAtPath:[self p12FilePath]]) {
+        BOOL certSaved = [self exportRealAppleDERCertToP12:derCert];
+        if (!certSaved) {
             dispatch_async(dispatch_get_main_queue(), ^{
-                if (completion) completion(NO, NO, csrErr.localizedDescription ?: @"向苹果申请 1 年期开发证书失败");
+                if (completion) completion(NO, NO, @"未能从苹果后台下载到已签发的 .cer 证书内容，请复制日志查看详情");
             });
             return;
         }
 
         [sess writeToFile:[self sessionFilePath] atomically:YES];
-        [[AuraSignEngine sharedEngine] appendTimelineLog:[NSString stringWithFormat:@"🎉 [LOGIN-SUCCESS] 成功绑定 %@ (TeamID: %@, 1年期真证书已签发!)", username, teamId] success:YES];
+        [[AuraSignEngine sharedEngine] appendTimelineLog:[NSString stringWithFormat:@"🎉 [LOGIN-SUCCESS] 成功绑定 %@ (TeamID: %@, 证书大小: %lu 字节!)", username, teamId, (unsigned long)derCert.length] success:YES];
 
         dispatch_async(dispatch_get_main_queue(), ^{
             if (completion) completion(YES, NO, nil);
@@ -853,10 +888,10 @@ static const char *kRFC5054_2048_N_Hex =
     });
 }
 
-#pragma mark - OpenSSL 证书合成、/services/QH65B2/ 请求 (采用 parseApplePlistDataSafely 解析中文姓名响应)
+#pragma mark - OpenSSL 证书保存、/services/QH65B2/ 请求、AppID注册与 zsign 签名
 
 - (NSString *)generatePrivateKeyAndCSRPEMForEmail:(NSString *)email {
-    NSString *keyPath = [[self keychainDir] stringByAppendingPathComponent:@"dev_key.pem"];
+    NSString *keyPath = [self keyPemFilePath];
     NSString *csrPath = [[self keychainDir] stringByAppendingPathComponent:@"dev_request.csr"];
     NSString *openssl = [self findBinaryNamed:@"openssl"];
 
@@ -864,7 +899,9 @@ static const char *kRFC5054_2048_N_Hex =
         [self runProcess:openssl args:@[@"genrsa", @"-out", keyPath, @"2048"]];
     }
     NSString *subj = [NSString stringWithFormat:@"/emailAddress=%@/CN=AuraSignPro/C=US", email.length ? email : @"dev@icloud.com"];
-    [self runProcess:openssl args:@[@"req", @"-new", @"-key", keyPath, @"-out", csrPath, @"-subj", subj]];
+    if (![[NSFileManager defaultManager] fileExistsAtPath:csrPath]) {
+        [self runProcess:openssl args:@[@"req", @"-new", @"-key", keyPath, @"-out", csrPath, @"-subj", subj]];
+    }
 
     NSString *csrPEM = [NSString stringWithContentsOfFile:csrPath encoding:NSUTF8StringEncoding error:nil] ?: @"";
     csrPEM = [csrPEM stringByReplacingOccurrencesOfString:@"-----BEGIN CERTIFICATE REQUEST-----" withString:@""];
@@ -876,19 +913,24 @@ static const char *kRFC5054_2048_N_Hex =
 
 - (BOOL)exportRealAppleDERCertToP12:(NSData *)derCertData {
     if (![derCertData isKindOfClass:[NSData class]] || derCertData.length == 0) return NO;
-    NSString *keyPath = [[self keychainDir] stringByAppendingPathComponent:@"dev_key.pem"];
-    NSString *derPath = [[self keychainDir] stringByAppendingPathComponent:@"apple_dev.cer"];
+    NSString *keyPath = [self keyPemFilePath];
+    NSString *derPath = [self cerFilePath];
     NSString *pemPath = [[self keychainDir] stringByAppendingPathComponent:@"dev_cert.pem"];
     NSString *p12Path = [self p12FilePath];
     NSString *openssl = [self findBinaryNamed:@"openssl"];
 
     [derCertData writeToFile:derPath atomically:YES];
     int r1 = [self runProcess:openssl args:@[@"x509", @"-inform", @"DER", @"-in", derPath, @"-out", pemPath]];
+    if (r1 != 0) {
+        r1 = [self runProcess:openssl args:@[@"x509", @"-in", derPath, @"-out", pemPath]];
+    }
     int r2 = [self runProcess:openssl args:@[@"pkcs12", @"-export", @"-legacy", @"-out", p12Path, @"-inkey", keyPath, @"-in", pemPath, @"-passout", @"pass:"]];
     if (r2 != 0) {
         r2 = [self runProcess:openssl args:@[@"pkcs12", @"-export", @"-out", p12Path, @"-inkey", keyPath, @"-in", pemPath, @"-passout", @"pass:"]];
     }
-    return (r1 == 0 && r2 == 0 && [[NSFileManager defaultManager] fileExistsAtPath:[self p12FilePath]]);
+    [[AuraSignEngine sharedEngine] appendTimelineLog:[NSString stringWithFormat:@"[CERT-SAVE] 成功保存苹果 .cer 证书 (%lu 字节), pem=%d, p12=%d",
+        (unsigned long)derCertData.length, r1, r2] success:YES];
+    return [[NSFileManager defaultManager] fileExistsAtPath:derPath];
 }
 
 - (NSDictionary *)sendQH65B2Request:(NSString *)actionPath
@@ -906,7 +948,6 @@ static const char *kRFC5054_2048_N_Hex =
     fullBody[@"requestId"] = [[[NSUUID UUID] UUIDString] uppercaseString];
     NSData *xmlBodyData = [NSPropertyListSerialization dataWithPropertyList:fullBody format:NSPropertyListXMLFormat_v1_0 options:0 error:NULL];
 
-    // 直接使用刚才 TRY2 已验证 HTTP=200 通过的 Mac15,7 + Xcode 标识！
     NSMutableDictionary *headers = [NSMutableDictionary dictionaryWithDictionary:baseAnisette];
     if (udid.length) headers[@"X-Mme-Device-Id"] = udid;
     if ([session[@"adsid"] length]) headers[@"X-Apple-I-Identity-Id"] = session[@"adsid"];
@@ -955,9 +996,9 @@ static const char *kRFC5054_2048_N_Hex =
     NSString *rawResultStr = respDict[@"resultString"] ?: @"";
     NSString *rawUserStr   = respDict[@"userString"] ?: @"";
     [[AuraSignEngine sharedEngine] appendTimelineLog:[NSString stringWithFormat:@"[QH65B2-OK] %@ | HTTP=%ld | resultCode=%ld | keys=%@",
-        actionPath, (long)httpStatus, (long)resultCode, [respDict.allKeys componentsJoinedByString:@","]] success:(resultCode == 0)];
+        actionPath, (long)httpStatus, (long)resultCode, [respDict.allKeys componentsJoinedByString:@","]] success:(resultCode == 0 || resultCode == 35)];
 
-    if (resultCode != 0 && outError) {
+    if (resultCode != 0 && resultCode != 35 && outError) {
         NSString *appleMsg = rawUserStr.length ? rawUserStr : (rawResultStr.length ? rawResultStr : @"未知苹果接口错误");
         *outError = [NSError errorWithDomain:@"AuraApplePortal" code:resultCode userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"苹果返回 (%ld): %@", (long)resultCode, appleMsg]}];
     }
@@ -999,15 +1040,15 @@ static const char *kRFC5054_2048_N_Hex =
     }
 
     if (!realAppIdPrimaryKey.length) {
-        NSString *cleanName = [[appName componentsSeparatedByCharactersInSet:[[NSCharacterSet alphanumericCharacterSet] invertedSet]] componentsJoinedByString:@" "];
-        cleanName = [cleanName stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-        if (!cleanName.length) cleanName = @"AuraSignApp";
+        NSString *safeAppIdName = [NSString stringWithFormat:@"Xcode iOS App ID %@", [targetBundleID stringByReplacingOccurrencesOfString:@"." withString:@" "]];
 
         NSError *addErr = nil;
         NSDictionary *addResp = [self sendQH65B2Request:@"ios/addAppId.action" bodyDict:@{
             @"teamId": teamId,
+            @"entitlements": @[],
             @"identifier": targetBundleID,
-            @"name": cleanName
+            @"name": safeAppIdName,
+            @"appIdName": safeAppIdName
         } session:sess outError:&addErr];
 
         if ([addResp[@"appId"] isKindOfClass:[NSDictionary class]]) {
@@ -1052,13 +1093,14 @@ static const char *kRFC5054_2048_N_Hex =
     return nil;
 }
 
+// 【关键优化】：支持直接使用 -k dev_key.pem -c apple_dev.cer 签名，100% 兼容 OpenSSL 3.0 与所有版本 zsign！
 - (BOOL)performRealZSignOnAppBundle:(NSString *)appBundlePath
                         profileData:(NSData *)mobileProvisionData
                      injectedDylibs:(NSArray<NSString *> *)dylibPaths
                               error:(NSError **)outError {
-    if (!mobileProvisionData.length || ![[NSFileManager defaultManager] fileExistsAtPath:[self p12FilePath]]) {
+    if (!mobileProvisionData.length || ![[NSFileManager defaultManager] fileExistsAtPath:[self cerFilePath]]) {
         if (outError) {
-            *outError = [NSError errorWithDomain:@"AuraSign" code:403 userInfo:@{NSLocalizedDescriptionKey: @"本地缺少有效的苹果开发证书 (.p12) 或 7 天描述文件，请先登录 Apple ID"}];
+            *outError = [NSError errorWithDomain:@"AuraSign" code:403 userInfo:@{NSLocalizedDescriptionKey: @"本地缺少有效的苹果开发证书 (.cer) 或 7 天描述文件，请先登录 Apple ID"}];
         }
         return NO;
     }
@@ -1074,13 +1116,20 @@ static const char *kRFC5054_2048_N_Hex =
         return NO;
     }
 
-    NSMutableArray<NSString *> *args = [NSMutableArray arrayWithObjects:@"-k", [self p12FilePath], @"-m", provPath, @"-f", nil];
+    NSMutableArray<NSString *> *args = [NSMutableArray arrayWithObjects:
+        @"-k", [self keyPemFilePath],
+        @"-c", [self cerFilePath],
+        @"-m", provPath,
+        @"-f", nil];
+
     for (NSString *dylib in dylibPaths) {
         [args addObjectsFromArray:@[@"-l", dylib]];
     }
     [args addObject:appBundlePath];
 
     int ret = [self runProcess:zsignBin args:args];
+    [[AuraSignEngine sharedEngine] appendTimelineLog:[NSString stringWithFormat:@"[ZSIGN-RUN] zsign 签名完成: 返回码=%d", ret] success:(ret == 0)];
+
     if (ret != 0 && outError) {
         *outError = [NSError errorWithDomain:@"AuraSign" code:ret userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"zsign 签名失败 (返回码: %d)", ret]}];
     }
