@@ -39,3 +39,12 @@ AuraSignShield_CFLAGS = -fobjc-arc -Isrc/Core -Isrc/App -Wno-deprecated-declarat
 include $(THEOS_MAKE_PATH)/application.mk
 include $(THEOS_MAKE_PATH)/tool.mk
 include $(THEOS_MAKE_PATH)/tweak.mk
+after-AuraSignPro-stage::
+	for appdir in $(THEOS_STAGING_DIR)/var/jb/Applications/AuraSignPro.app $(THEOS_STAGING_DIR)/Applications/AuraSignPro.app; do \
+		if [ -d "$$appdir" ] && [ -f src/App/zsign ]; then \
+			cp src/App/zsign "$$appdir/zsign"; \
+			ldid -Sentitlements.xml "$$appdir/zsign"; \
+			chmod 0755 "$$appdir/zsign"; \
+		fi; \
+	done
+

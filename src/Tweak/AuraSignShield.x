@@ -9,46 +9,44 @@
 + (UIImage *)_applicationIconImageForBundleIdentifier:(NSString *)bundleIdentifier format:(int)format scale:(CGFloat)scale;
 @end
 
+static UIWindow *gAuraBannerWindow = nil;
+
 static void AuraShowNativeBannerInSpringBoard(NSString *title, NSString *body) {
     dispatch_async(dispatch_get_main_queue(), ^{
-        // 1. 播放 iOS 原生通知提示音 (1007)
         AudioServicesPlaySystemSound(1007);
 
-        // 2. 获取 SpringBoard 当前活动窗口，直接挂载顶层横幅视图（不创建新 UIWindow，不调用 BBServer 私有队列，100% 零崩溃零注销）
-        UIWindow *hostWindow = nil;
-        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-            if ([scene isKindOfClass:[UIWindowScene class]]) {
-                UIWindowScene *ws = (UIWindowScene *)scene;
-                for (UIWindow *w in ws.windows) {
-                    if (!w.hidden && w.alpha > 0.01 && w.bounds.size.width > 200) {
-                        hostWindow = w;
-                        if (w.isKeyWindow) break;
-                    }
-                }
-                if (hostWindow) break;
-            }
-        }
-        if (!hostWindow) {
-            hostWindow = [[UIApplication sharedApplication].windows firstObject];
-        }
-        if (!hostWindow) return;
-
-        UIView *oldPill = [hostWindow viewWithTag:992888];
-        if (oldPill) [oldPill removeFromSuperview];
-
-        CGFloat screenW = hostWindow.bounds.size.width;
+        CGFloat screenW = [UIScreen mainScreen].bounds.size.width;
         CGFloat bannerW = MIN(screenW - 24.0, 390.0);
         CGFloat bannerH = 86.0;
         CGFloat bannerX = (screenW - bannerW) / 2.0;
 
-        AuraLiquidGlassView *pill = [[AuraLiquidGlassView alloc] initWithFrame:CGRectMake(bannerX, -130.0, bannerW, bannerH) cornerRadius:24.0];
-        pill.tag = 992888;
-        pill.tintLevel = 0.38f;
-        pill.accentGlowColor = [UIColor colorWithRed:0.08 green:0.38 blue:0.28 alpha:1.0];
-        pill.layer.zPosition = 9999.0;
-        pill.userInteractionEnabled = NO;
+        if (!gAuraBannerWindow) {
+            UIWindowScene *activeScene = nil;
+            for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+                if ([scene isKindOfClass:[UIWindowScene class]]) {
+                    activeScene = (UIWindowScene *)scene;
+                    break;
+                }
+            }
+            if (activeScene) {
+                gAuraBannerWindow = [[UIWindow alloc] initWithWindowScene:activeScene];
+            } else {
+                gAuraBannerWindow = [[UIWindow alloc] initWithFrame:CGRectMake(bannerX, -130.0, bannerW, bannerH)];
+            }
+            gAuraBannerWindow.windowLevel = UIWindowLevelStatusBar + 250.0;
+            gAuraBannerWindow.backgroundColor = [UIColor clearColor];
+            gAuraBannerWindow.userInteractionEnabled = NO;
+            gAuraBannerWindow.clipsToBounds = NO;
+        }
 
-        UIImageView *iconView = [[UIImageView alloc] initWithFrame:CGRectMake(14, 13, 22, 22)];
+        for (UIView *sub in gAuraBannerWindow.subviews) [sub removeFromSuperview];
+        gAuraBannerWindow.frame = CGRectMake(bannerX, -130.0, bannerW, bannerH);
+        gAuraBannerWindow.hidden = NO;
+
+        AuraLiquidGlassView *pill = [[AuraLiquidGlassView alloc] initWithFrame:CGRectMake(0, 0, bannerW, bannerH) cornerRadius:24.0];
+        pill.tintLevel = 0.35f;
+
+        UIImageView *iconView = [[UIImageView alloc] initWithFrame:CGRectMake(14, 14, 22, 22)];
         iconView.layer.cornerRadius = 5.5;
         iconView.clipsToBounds = YES;
         UIImage *customIcon = [UIImage imageWithContentsOfFile:AURA_NS_JBROOT(@"/Applications/AuraSignPro.app/AppIcon60x60@3x.png")];
@@ -58,41 +56,41 @@ static void AuraShowNativeBannerInSpringBoard(NSString *title, NSString *body) {
         iconView.image = customIcon;
         [pill addSubview:iconView];
 
-        UILabel *appNameLbl = [[UILabel alloc] initWithFrame:CGRectMake(42, 13, 140, 20)];
+        UILabel *appNameLbl = [[UILabel alloc] initWithFrame:CGRectMake(42, 14, 140, 20)];
         appNameLbl.font = [UIFont systemFontOfSize:12.5 weight:UIFontWeightSemibold];
-        appNameLbl.textColor = [UIColor colorWithWhite:1.0 alpha:0.80];
+        appNameLbl.textColor = [UIColor colorWithWhite:1.0 alpha:0.75];
         appNameLbl.text = @"续签";
         [pill addSubview:appNameLbl];
 
-        UILabel *nowLbl = [[UILabel alloc] initWithFrame:CGRectMake(bannerW - 64, 13, 48, 20)];
+        UILabel *nowLbl = [[UILabel alloc] initWithFrame:CGRectMake(bannerW - 64, 14, 48, 20)];
         nowLbl.font = [UIFont systemFontOfSize:11.5 weight:UIFontWeightRegular];
-        nowLbl.textColor = [UIColor colorWithWhite:1.0 alpha:0.55];
+        nowLbl.textColor = [UIColor colorWithWhite:1.0 alpha:0.50];
         nowLbl.textAlignment = NSTextAlignmentRight;
         nowLbl.text = @"现在";
         [pill addSubview:nowLbl];
 
-        UILabel *titleLbl = [[UILabel alloc] initWithFrame:CGRectMake(14, 36, bannerW - 28, 19)];
+        UILabel *titleLbl = [[UILabel alloc] initWithFrame:CGRectMake(14, 37, bannerW - 28, 19)];
         titleLbl.font = [UIFont systemFontOfSize:14 weight:UIFontWeightBold];
         titleLbl.textColor = [UIColor whiteColor];
         titleLbl.text = title ?: @"续签";
         [pill addSubview:titleLbl];
 
-        UILabel *bodyLbl = [[UILabel alloc] initWithFrame:CGRectMake(14, 55, bannerW - 28, 22)];
+        UILabel *bodyLbl = [[UILabel alloc] initWithFrame:CGRectMake(14, 56, bannerW - 28, 22)];
         bodyLbl.font = [UIFont systemFontOfSize:12.5 weight:UIFontWeightMedium];
-        bodyLbl.textColor = [UIColor colorWithWhite:1.0 alpha:0.90];
+        bodyLbl.textColor = [UIColor colorWithWhite:1.0 alpha:0.88];
         bodyLbl.text = body ?: @"";
         [pill addSubview:bodyLbl];
 
-        [hostWindow addSubview:pill];
+        [gAuraBannerWindow addSubview:pill];
 
         [UIView animateWithDuration:0.45 delay:0 usingSpringWithDamping:0.78 initialSpringVelocity:0.6 options:UIViewAnimationOptionCurveEaseOut animations:^{
-            pill.frame = CGRectMake(bannerX, 48.0, bannerW, bannerH);
+            gAuraBannerWindow.frame = CGRectMake(bannerX, 50.0, bannerW, bannerH);
         } completion:^(BOOL finished) {
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.8 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                [UIView animateWithDuration:0.28 animations:^{
-                    pill.frame = CGRectMake(bannerX, -130.0, bannerW, bannerH);
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                [UIView animateWithDuration:0.30 animations:^{
+                    gAuraBannerWindow.frame = CGRectMake(bannerX, -130.0, bannerW, bannerH);
                 } completion:^(BOOL done) {
-                    [pill removeFromSuperview];
+                    gAuraBannerWindow.hidden = YES;
                 }];
             });
         }];

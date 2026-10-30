@@ -403,56 +403,58 @@ static uint32_t aura_crc32_compute(const uint8_t *data, size_t length) {
     if (completionHandler) completionHandler(0x1A);
 }
 
+static UIWindow *gInAppBannerWindow = nil;
+
 - (void)sendSystemNotificationWithTitle:(NSString *)title body:(NSString *)body {
     [self loadPreferences];
     if (!_notificationEnabled) return;
 
     NSString *myBid = [[NSBundle mainBundle] bundleIdentifier];
     if ([myBid isEqualToString:@"com.aurasign.pro"]) {
-        // 当前在「续签」App 前台：直接在 App 主窗口弹出横幅并播放 1007 提示音，不触发跨进程 SpringBoard 通知
         dispatch_async(dispatch_get_main_queue(), ^{
             AudioServicesPlaySystemSound(1007);
             UINotificationFeedbackGenerator *gen = [[UINotificationFeedbackGenerator alloc] init];
             [gen notificationOccurred:UINotificationFeedbackTypeSuccess];
 
-            UIWindow *hostWin = nil;
-            for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-                if ([scene isKindOfClass:[UIWindowScene class]]) {
-                    for (UIWindow *w in ((UIWindowScene *)scene).windows) {
-                        if (!w.hidden && w.bounds.size.width > 200) {
-                            hostWin = w;
-                            if (w.isKeyWindow) break;
-                        }
-                    }
-                    if (hostWin) break;
-                }
-            }
-            if (!hostWin) hostWin = [[UIApplication sharedApplication].windows firstObject];
-            if (!hostWin) return;
-
-            UIView *oldPill = [hostWin viewWithTag:992889];
-            if (oldPill) [oldPill removeFromSuperview];
-
-            CGFloat screenW = hostWin.bounds.size.width;
+            CGFloat screenW = [UIScreen mainScreen].bounds.size.width;
             CGFloat bannerW = MIN(screenW - 24.0, 390.0);
             CGFloat bannerH = 86.0;
             CGFloat bannerX = (screenW - bannerW) / 2.0;
 
+            if (!gInAppBannerWindow) {
+                UIWindowScene *activeScene = nil;
+                for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+                    if ([scene isKindOfClass:[UIWindowScene class]]) {
+                        activeScene = (UIWindowScene *)scene;
+                        break;
+                    }
+                }
+                if (activeScene) {
+                    gInAppBannerWindow = [[UIWindow alloc] initWithWindowScene:activeScene];
+                } else {
+                    gInAppBannerWindow = [[UIWindow alloc] initWithFrame:CGRectMake(bannerX, -130.0, bannerW, bannerH)];
+                }
+                gInAppBannerWindow.windowLevel = UIWindowLevelAlert + 300.0;
+                gInAppBannerWindow.backgroundColor = [UIColor clearColor];
+                gInAppBannerWindow.userInteractionEnabled = NO;
+                gInAppBannerWindow.clipsToBounds = NO;
+            }
+            for (UIView *sub in gInAppBannerWindow.subviews) [sub removeFromSuperview];
+            gInAppBannerWindow.frame = CGRectMake(bannerX, -130.0, bannerW, bannerH);
+            gInAppBannerWindow.hidden = NO;
+
             Class glassCls = NSClassFromString(@"AuraLiquidGlassView");
             UIView *pill = nil;
             if (glassCls) {
-                pill = [(id)[glassCls alloc] initWithFrame:CGRectMake(bannerX, -130.0, bannerW, bannerH) cornerRadius:24.0];
+                pill = [(id)[glassCls alloc] initWithFrame:CGRectMake(0, 0, bannerW, bannerH) cornerRadius:24.0];
                 ((void (*)(id, SEL, CGFloat))objc_msgSend)(pill, sel_registerName("setTintLevel:"), (CGFloat)0.38);
                 ((void (*)(id, SEL, id))objc_msgSend)(pill, sel_registerName("setAccentGlowColor:"), [UIColor colorWithRed:0.08 green:0.38 blue:0.28 alpha:1.0]);
             } else {
-                pill = [[UIView alloc] initWithFrame:CGRectMake(bannerX, -130.0, bannerW, bannerH)];
+                pill = [[UIView alloc] initWithFrame:CGRectMake(0, 0, bannerW, bannerH)];
                 pill.backgroundColor = [UIColor colorWithWhite:0.12 alpha:0.92];
                 pill.layer.cornerRadius = 24.0;
                 pill.clipsToBounds = YES;
             }
-            pill.tag = 992889;
-            pill.layer.zPosition = 9999.0;
-            pill.userInteractionEnabled = NO;
 
             UIImageView *iconView = [[UIImageView alloc] initWithFrame:CGRectMake(14, 13, 22, 22)];
             iconView.layer.cornerRadius = 5.5;
@@ -489,16 +491,16 @@ static uint32_t aura_crc32_compute(const uint8_t *data, size_t length) {
             bodyLbl.text = body ?: @"";
             [pill addSubview:bodyLbl];
 
-            [hostWin addSubview:pill];
+            [gInAppBannerWindow addSubview:pill];
 
             [UIView animateWithDuration:0.45 delay:0 usingSpringWithDamping:0.78 initialSpringVelocity:0.6 options:UIViewAnimationOptionCurveEaseOut animations:^{
-                pill.frame = CGRectMake(bannerX, 48.0, bannerW, bannerH);
+                gInAppBannerWindow.frame = CGRectMake(bannerX, 48.0, bannerW, bannerH);
             } completion:^(BOOL finished) {
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.8 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                     [UIView animateWithDuration:0.28 animations:^{
-                        pill.frame = CGRectMake(bannerX, -130.0, bannerW, bannerH);
+                        gInAppBannerWindow.frame = CGRectMake(bannerX, -130.0, bannerW, bannerH);
                     } completion:^(BOOL done) {
-                        [pill removeFromSuperview];
+                        gInAppBannerWindow.hidden = YES;
                     }];
                 });
             }];

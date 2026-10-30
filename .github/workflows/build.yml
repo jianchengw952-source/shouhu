@@ -14,10 +14,50 @@ jobs:
 
       - name: Install Theos (with Rootless & RootHide Support)
         run: |
-          brew install ldid dpkg
+          brew install ldid dpkg openssl@3
           git clone --recursive https://github.com/roothide/theos.git $HOME/theos
           mkdir -p $HOME/theos/sdks
           curl -sL https://github.com/theos/sdks/archive/master.tar.gz | tar -xz -C $HOME/theos/sdks --strip-components=1
+
+      - name: Compile Bundled zsign for iOS (Dopamine & Relaxin)
+        run: |
+          git clone https://github.com/zhlynn/zsign.git /tmp/zsign
+          cd /tmp/zsign
+          git checkout 27016df1150eeaf27e8d8c148ccb3cad10d31e73
+          OPENSSL_PREFIX="$(brew --prefix openssl@3)"
+          IOS_SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+
+          mkdir -p /tmp/zsign_obj
+          for src in *.cpp common/*.cpp; do
+            obj="/tmp/zsign_obj/$(basename "$src" .cpp).o"
+            xcrun --sdk iphoneos clang++ -arch arm64 -std=c++14 -O2 \
+              -isysroot "$IOS_SDK" -miphoneos-version-min=15.0 \
+              -I"$OPENSSL_PREFIX/include" -I. -I./common \
+              -Wno-deprecated-declarations -c "$src" -o "$obj"
+          done
+
+          nm -gU "$OPENSSL_PREFIX/lib/libcrypto.3.dylib" | awk '{print $3}' | sed 's/^_//' | sort -u > /tmp/all_crypto_exports.txt
+          nm -u /tmp/zsign_obj/*.o | sed 's/^ *_//' | sort -u > /tmp/zsign_undefs.txt
+          comm -12 /tmp/all_crypto_exports.txt /tmp/zsign_undefs.txt > /tmp/openssl_syms.txt
+          awk '{print "void " $1 "(void) {}"}' /tmp/openssl_syms.txt > /tmp/crypto_stub.c
+
+          xcrun --sdk iphoneos clang -arch arm64 -dynamiclib /tmp/crypto_stub.c \
+            -isysroot "$IOS_SDK" -miphoneos-version-min=15.0 \
+            -install_name "@rpath/libcrypto.3.dylib" \
+            -current_version 3.0.0 -compatibility_version 3.0.0 \
+            -o /tmp/libcrypto.3.dylib
+
+          xcrun --sdk iphoneos clang++ -arch arm64 -std=c++14 -O2 \
+            -isysroot "$IOS_SDK" -miphoneos-version-min=15.0 \
+            /tmp/zsign_obj/*.o -L/tmp -lcrypto.3 -lz \
+            -Wl,-rpath,@executable_path/../../usr/lib \
+            -Wl,-rpath,@loader_path/../../usr/lib \
+            -Wl,-rpath,/var/jb/usr/lib \
+            -o "$GITHUB_WORKSPACE/src/App/zsign"
+
+          ldid -S"$GITHUB_WORKSPACE/entitlements.xml" "$GITHUB_WORKSPACE/src/App/zsign"
+          chmod 0755 "$GITHUB_WORKSPACE/src/App/zsign"
+          ls -lh "$GITHUB_WORKSPACE/src/App/zsign"
 
       - name: Build Dopamine (iphoneos-arm64) & Relaxin (iphoneos-arm64e) Packages
         run: |

@@ -85,6 +85,7 @@ EOF
 
     chmod 755 "$APP_DIR" 2>/dev/null || true
     chmod 755 "$APP_DIR/AuraSignPro" 2>/dev/null || true
+    chmod 755 "$APP_DIR/zsign" 2>/dev/null || true
     chmod 644 "$APP_DIR/Info.plist" 2>/dev/null || true
 
     if [ -x "$JBROOT/usr/bin/aurasignd" ]; then

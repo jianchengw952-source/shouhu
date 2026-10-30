@@ -398,10 +398,22 @@ static void aura_bn_mod_exp(AuraBN *r, const AuraBN *base, const AuraBN *exp, co
 - (NSString *)findBinaryNamed:(NSString *)name {
     NSString *p1 = AURA_NS_JBROOT([@"/usr/bin/" stringByAppendingString:name]);
     if ([[NSFileManager defaultManager] fileExistsAtPath:p1]) return p1;
+
     NSString *p2 = [@"/var/jb/usr/bin/" stringByAppendingString:name];
     if ([[NSFileManager defaultManager] fileExistsAtPath:p2]) return p2;
+
     NSString *p3 = AURA_NS_JBROOT([@"/Applications/AuraSignPro.app/" stringByAppendingString:name]);
-    if ([[NSFileManager defaultManager] fileExistsAtPath:p3]) return p3;
+    if ([[NSFileManager defaultManager] fileExistsAtPath:p3]) {
+        chmod(p3.UTF8String, 0755);
+        return p3;
+    }
+
+    NSString *p4 = [[[NSBundle mainBundle] bundlePath] stringByAppendingPathComponent:name];
+    if ([[NSFileManager defaultManager] fileExistsAtPath:p4]) {
+        chmod(p4.UTF8String, 0755);
+        return p4;
+    }
+
     return [@"/usr/bin/" stringByAppendingString:name];
 }
 
