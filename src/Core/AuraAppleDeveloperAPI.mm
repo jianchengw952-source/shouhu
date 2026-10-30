@@ -1,4 +1,4 @@
-// src/Core/AuraAppleDeveloperAPI.mm (采用 AltSign#47 新版 User-Agent 彻底解决苹果 503 HTML 拦截 + 令牌缓存终极版)
+// src/Core/AuraAppleDeveloperAPI.mm (移除伪造 LU/SRL-NO 请求头解决 403 empty 拦截 + 双通道自动适配终极版)
 #import <CoreFoundation/CoreFoundation.h>
 #import <UIKit/UIKit.h>
 #import <CommonCrypto/CommonDigest.h>
@@ -162,27 +162,6 @@ static const char *kRFC5054_2048_N_Hex =
     return @"";
 }
 
-- (NSString *)realDeviceSerialNumber {
-    void *gestalt = dlopen("/usr/lib/libMobileGestalt.dylib", RTLD_LAZY);
-    if (gestalt) {
-        MGCopyAnswerFunc copyAnswer = (MGCopyAnswerFunc)dlsym(gestalt, "MGCopyAnswer");
-        if (copyAnswer) {
-            CFStringRef snRef = (CFStringRef)copyAnswer(CFSTR("SerialNumber"));
-            if (snRef) return (__bridge_transfer NSString *)snRef;
-        }
-    }
-    return @"C02ABCDEF123";
-}
-
-- (NSString *)localUserIDHex {
-    NSString *seed = [[self realDeviceUDID] stringByAppendingString:@"-mobile"];
-    NSData *hash = [self sha256Data:[seed dataUsingEncoding:NSUTF8StringEncoding]];
-    NSMutableString *hex = [NSMutableString stringWithCapacity:64];
-    const unsigned char *bytes = (const unsigned char *)hash.bytes;
-    for (int i = 0; i < 32; i++) [hex appendFormat:@"%02X", bytes[i]];
-    return hex;
-}
-
 - (NSString *)findBinaryNamed:(NSString *)name {
     NSString *p1 = AURA_NS_JBROOT([@"/usr/bin/" stringByAppendingString:name]);
     if ([[NSFileManager defaultManager] fileExistsAtPath:p1]) return p1;
@@ -215,14 +194,15 @@ static const char *kRFC5054_2048_N_Hex =
                                method:(NSString *)httpMethod
                               headers:(NSDictionary<NSString *, NSString *> *)headers
                              bodyData:(NSData *)bodyData
-                          outExitCode:(int *)outExitCode {
+                          outExitCode:(int *)outExitCode
+                        outHttpStatus:(NSInteger *)outHttpStatus {
     NSString *curlBin = [self findBinaryNamed:@"curl"];
     NSString *uuid = [[NSUUID UUID] UUIDString];
     NSString *reqFile  = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"aura_req_%@.dat", uuid]];
     NSString *respFile = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"aura_resp_%@.dat", uuid]];
+    NSString *hdrFile  = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"aura_hdr_%@.txt", uuid]];
 
-    // 加入 --http1.1 防止苹果 CDN 在 HTTP/2 连接复用时掐断第 3~4 个请求！
-    NSMutableArray<NSString *> *args = [NSMutableArray arrayWithObjects:@"-s", @"-k", @"--http1.1", @"--connect-timeout", @"15", @"--max-time", @"25", @"-X", (httpMethod ?: @"POST"), urlStr, nil];
+    NSMutableArray<NSString *> *args = [NSMutableArray arrayWithObjects:@"-s", @"-k", @"--http1.1", @"--connect-timeout", @"15", @"--max-time", @"25", @"-D", hdrFile, @"-X", (httpMethod ?: @"POST"), urlStr, nil];
 
     [headers enumerateKeysAndObjectsUsingBlock:^(NSString *k, NSString *v, BOOL *stop) {
         [args addObjectsFromArray:@[@"-H", [NSString stringWithFormat:@"%@: %@", k, v]]];
@@ -237,9 +217,22 @@ static const char *kRFC5054_2048_N_Hex =
     int ret = [self runProcess:curlBin args:args];
     if (outExitCode) *outExitCode = ret;
 
+    if (outHttpStatus) {
+        *outHttpStatus = 0;
+        NSString *hdrStr = [NSString stringWithContentsOfFile:hdrFile encoding:NSUTF8StringEncoding error:nil];
+        NSArray *lines = [hdrStr componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]];
+        for (NSString *line in lines) {
+            if ([line hasPrefix:@"HTTP/"]) {
+                NSArray *parts = [line componentsSeparatedByString:@" "];
+                if (parts.count >= 2) *outHttpStatus = [parts[1] integerValue];
+            }
+        }
+    }
+
     NSData *respData = [NSData dataWithContentsOfFile:respFile];
     [[NSFileManager defaultManager] removeItemAtPath:reqFile error:nil];
     [[NSFileManager defaultManager] removeItemAtPath:respFile error:nil];
+    [[NSFileManager defaultManager] removeItemAtPath:hdrFile error:nil];
     return respData;
 }
 
@@ -340,7 +333,7 @@ static const char *kRFC5054_2048_N_Hex =
     return plain;
 }
 
-#pragma mark - 【核心修复】：统一采用 AltSign#47 的 AuthKit/1 (com.apple.dt.Xcode/3594.4.1) User-Agent 彻底消除 503！
+#pragma mark - GSA SRP6a 请求 (已验证 4秒一次通过)
 
 - (NSDictionary *)sendGSAServiceRequest:(NSDictionary *)requestDict {
     NSDictionary *rootPlist = @{
@@ -371,13 +364,15 @@ static const char *kRFC5054_2048_N_Hex =
     }
 
     int curlExit = 0;
+    NSInteger httpStatus = 0;
     NSData *respData = nil;
     for (int attempt = 1; attempt <= 4; attempt++) {
         respData = [self executeCurlRequestWithURL:@"https://gsa.apple.com/grandslam/GsService2"
                                             method:@"POST"
                                            headers:headers
                                           bodyData:bodyData
-                                       outExitCode:&curlExit];
+                                       outExitCode:&curlExit
+                                     outHttpStatus:&httpStatus];
         if (respData.length > 0) {
             NSDictionary *parsed = [NSPropertyListSerialization propertyListWithData:respData options:0 format:NULL error:NULL];
             if ([parsed isKindOfClass:[NSDictionary class]]) {
@@ -389,7 +384,7 @@ static const char *kRFC5054_2048_N_Hex =
 
     NSString *rawPreview = [[NSString alloc] initWithData:respData encoding:NSUTF8StringEncoding] ?: @"non-utf8";
     if (rawPreview.length > 100) rawPreview = [rawPreview substringToIndex:100];
-    [[AuraSignEngine sharedEngine] appendTimelineLog:[NSString stringWithFormat:@"[GSA-CURL-ERR] exit=%d, len=%lu, raw=%@", curlExit, (unsigned long)respData.length, rawPreview] success:NO];
+    [[AuraSignEngine sharedEngine] appendTimelineLog:[NSString stringWithFormat:@"[GSA-CURL-ERR] HTTP=%ld, exit=%d, len=%lu, raw=%@", (long)httpStatus, curlExit, (unsigned long)respData.length, rawPreview] success:NO];
     return nil;
 }
 
@@ -413,7 +408,8 @@ static const char *kRFC5054_2048_N_Hex =
                              method:@"GET"
                             headers:headers
                            bodyData:nil
-                        outExitCode:NULL];
+                        outExitCode:NULL
+                      outHttpStatus:NULL];
 }
 
 - (BOOL)validate2FACodeWithAltSignEndpoint:(NSString *)code adsid:(NSString *)adsid idmsToken:(NSString *)idmsToken anisette:(NSDictionary *)anisette {
@@ -439,7 +435,8 @@ static const char *kRFC5054_2048_N_Hex =
                                             method:@"GET"
                                            headers:headers
                                           bodyData:nil
-                                       outExitCode:&curlExit];
+                                       outExitCode:&curlExit
+                                     outHttpStatus:NULL];
     NSDictionary *dict = resp.length ? [NSPropertyListSerialization propertyListWithData:resp options:0 format:NULL error:NULL] : nil;
     NSInteger ec = [dict[@"ec"] integerValue];
     [[AuraSignEngine sharedEngine] appendTimelineLog:[NSString stringWithFormat:@"[GSA-2FA-VALIDATE] 校验6位验证码: ec=%ld, em=%@", (long)ec, dict[@"em"] ?: @"OK"] success:(ec == 0)];
@@ -466,7 +463,6 @@ static const char *kRFC5054_2048_N_Hex =
         NSString *adsid = nil;
         NSString *xcodeToken = nil;
 
-        // 如果内存里刚刚已经成功兑换过该账号的 196 字节 Xcode 令牌，直接复用，无需重复跑 GSA 握手！
         if ([_cachedEmail isEqualToString:username] && _cachedAdsid.length > 0 && _cachedXcodeToken.length > 0 && twoFactorCode.length == 0) {
             adsid = _cachedAdsid;
             xcodeToken = _cachedXcodeToken;
@@ -731,12 +727,11 @@ static const char *kRFC5054_2048_N_Hex =
 
             if (!xcodeToken.length) {
                 dispatch_async(dispatch_get_main_queue(), ^{
-                    if (completion) completion(NO, NO, [NSString stringWithFormat:@"兑换 Xcode 令牌失败 (%ld: %@)，请稍后几秒重试", (long)appTokEc, appTokEm]);
+                    if (completion) completion(NO, NO, [NSString stringWithFormat:@"兑换 Xcode 令牌失败 (%ld: %@)，请稍后重试", (long)appTokEc, appTokEm]);
                 });
                 return;
             }
 
-            // 缓存这枚宝贵的 196 字节 Xcode 令牌！
             _cachedEmail = username;
             _cachedAdsid = adsid;
             _cachedXcodeToken = xcodeToken;
@@ -819,7 +814,7 @@ static const char *kRFC5054_2048_N_Hex =
     });
 }
 
-#pragma mark - OpenSSL 证书合成、/services/QH65B2/ 请求 (带 503 自动重试与非空字典校验)
+#pragma mark - OpenSSL 证书合成、/services/QH65B2/ 请求 (移除伪造 LU/SRL-NO + 双请求头自动适配)
 
 - (NSString *)generatePrivateKeyAndCSRPEMForEmail:(NSString *)email {
     NSString *keyPath = [[self keychainDir] stringByAppendingPathComponent:@"dev_key.pem"];
@@ -863,24 +858,9 @@ static const char *kRFC5054_2048_N_Hex =
                            outError:(NSError **)outError {
     NSString *urlStr = [NSString stringWithFormat:@"https://developerservices2.apple.com/services/QH65B2/%@?clientId=XABBG36SBA", actionPath];
 
-    NSMutableDictionary *headers = [NSMutableDictionary dictionaryWithDictionary:[[AuraSignEngine sharedEngine] fetchNativeAnisetteHeaders]];
+    // 【关键修复】：不再塞入任何伪造的 X-Apple-I-MD-LU 或 SRL-NO，保持与 08:53 通过校验时完全一致的原生 Anisette 头！
+    NSDictionary *baseAnisette = [[AuraSignEngine sharedEngine] fetchNativeAnisetteHeaders];
     NSString *udid = [self realDeviceUDID];
-    if (udid.length) headers[@"X-Mme-Device-Id"] = udid;
-    headers[@"X-Apple-I-MD-LU"] = [self localUserIDHex];
-    headers[@"X-Apple-I-SRL-NO"] = [self realDeviceSerialNumber];
-    if ([session[@"adsid"] length]) headers[@"X-Apple-I-Identity-Id"] = session[@"adsid"];
-    if ([session[@"xcodeToken"] length]) headers[@"X-Apple-GS-Token"] = session[@"xcodeToken"];
-    headers[@"X-Apple-App-Info"] = @"com.apple.gs.xcode.auth";
-    // 采用 AltSign#47 新版 User-Agent，彻底防止苹果网关返回 503 HTML！
-    headers[@"User-Agent"] = @"AuthKit/1 (com.apple.dt.Xcode/3594.4.1)";
-    headers[@"X-Xcode-Version"] = @"15.2 (15C500b)";
-    headers[@"X-MMe-Client-Info"] = @"<Mac15,7> <macOS;27.0;26A5378j> <com.apple.AuthKit/1 (com.apple.akd/1.0)>";
-    headers[@"Content-Type"] = @"text/x-xml-plist";
-    headers[@"Accept"] = @"text/x-xml-plist";
-    headers[@"Accept-Language"] = @"en-us";
-
-    [[AuraSignEngine sharedEngine] appendTimelineLog:[NSString stringWithFormat:@"[QH65B2-REQ] %@ | ADSID=%@ | XcodeTokenLen=%lu",
-        actionPath, session[@"adsid"] ?: @"空", (unsigned long)[session[@"xcodeToken"] length]] success:YES];
 
     NSMutableDictionary *fullBody = [NSMutableDictionary dictionaryWithDictionary:bodyDict ?: @{}];
     fullBody[@"clientId"] = @"XABBG36SBA";
@@ -888,29 +868,73 @@ static const char *kRFC5054_2048_N_Hex =
     fullBody[@"requestId"] = [[[NSUUID UUID] UUIDString] uppercaseString];
     NSData *xmlBodyData = [NSPropertyListSerialization dataWithPropertyList:fullBody format:NSPropertyListXMLFormat_v1_0 options:0 error:NULL];
 
+    // 准备两套 Client-Info 组合（组合 1: 与本机 Anisette 一致的 iPhone 标识；组合 2: Mac15,7 标识），哪套返回有效 Plist 且 resultCode==0 就用哪套！
+    NSArray *clientProfiles = @[
+        @{
+            @"ua": @"Xcode",
+            @"ci": @"<iPhone15,2> <iPhone OS;17.0.3;21A360> <com.apple.akd/1.0 (com.apple.akd/1.0)>",
+            @"xv": @"15.2 (15C500b)"
+        },
+        @{
+            @"ua": @"Xcode",
+            @"ci": @"<Mac15,7> <macOS;27.0;26A5378j> <com.apple.AuthKit/1 (com.apple.akd/1.0)>",
+            @"xv": @"27.0 (27A5218g)"
+        },
+        @{
+            @"ua": @"AuthKit/1 (com.apple.dt.Xcode/3594.4.1)",
+            @"ci": @"<Mac15,7> <macOS;27.0;26A5378j> <com.apple.AuthKit/1 (com.apple.akd/1.0)>",
+            @"xv": @"11.2 (11B41)"
+        }
+    ];
+
     int curlExit = 0;
+    NSInteger httpStatus = 0;
     NSData *respData = nil;
     NSDictionary *respDict = nil;
 
-    // 同样加入 4 次自动重试，若偶遇 503 HTML 自动等待 1.2 秒重试！
-    for (int attempt = 1; attempt <= 4; attempt++) {
-        respData = [self executeCurlRequestWithURL:urlStr method:@"POST" headers:headers bodyData:xmlBodyData outExitCode:&curlExit];
+    for (NSInteger i = 0; i < clientProfiles.count; i++) {
+        NSDictionary *prof = clientProfiles[i];
+        NSMutableDictionary *headers = [NSMutableDictionary dictionaryWithDictionary:baseAnisette];
+        if (udid.length) headers[@"X-Mme-Device-Id"] = udid;
+        if ([session[@"adsid"] length]) headers[@"X-Apple-I-Identity-Id"] = session[@"adsid"];
+        if ([session[@"xcodeToken"] length]) headers[@"X-Apple-GS-Token"] = session[@"xcodeToken"];
+        headers[@"X-Apple-App-Info"] = @"com.apple.gs.xcode.auth";
+        headers[@"User-Agent"] = prof[@"ua"];
+        headers[@"X-Xcode-Version"] = prof[@"xv"];
+        headers[@"X-MMe-Client-Info"] = prof[@"ci"];
+        headers[@"Content-Type"] = @"text/x-xml-plist";
+        headers[@"Accept"] = @"text/x-xml-plist";
+
+        respData = [self executeCurlRequestWithURL:urlStr
+                                            method:@"POST"
+                                           headers:headers
+                                          bodyData:xmlBodyData
+                                       outExitCode:&curlExit
+                                     outHttpStatus:&httpStatus];
+
         if (respData.length > 0) {
             id obj = [NSPropertyListSerialization propertyListWithData:respData options:0 format:NULL error:NULL];
             if ([obj isKindOfClass:[NSDictionary class]]) {
                 respDict = (NSDictionary *)obj;
-                break;
+                NSInteger rc = [respDict[@"resultCode"] integerValue];
+                [[AuraSignEngine sharedEngine] appendTimelineLog:[NSString stringWithFormat:@"[QH65B2-TRY%ld] %@ | HTTP=%ld | resultCode=%ld | keys=%@",
+                    (long)(i + 1), actionPath, (long)httpStatus, (long)rc, [respDict.allKeys componentsJoinedByString:@","]] success:(rc == 0)];
+                if (rc == 0) break;
+            } else {
+                NSString *rawStr = [[NSString alloc] initWithData:respData encoding:NSUTF8StringEncoding] ?: @"non-utf8";
+                if (rawStr.length > 80) rawStr = [rawStr substringToIndex:80];
+                [[AuraSignEngine sharedEngine] appendTimelineLog:[NSString stringWithFormat:@"[QH65B2-TRY%ld] %@ | HTTP=%ld | 非Plist: %@",
+                    (long)(i + 1), actionPath, (long)httpStatus, rawStr] success:NO];
             }
+        } else {
+            [[AuraSignEngine sharedEngine] appendTimelineLog:[NSString stringWithFormat:@"[QH65B2-TRY%ld] %@ | HTTP=%ld | exit=%d | 响应为空",
+                (long)(i + 1), actionPath, (long)httpStatus, curlExit] success:NO];
         }
-        [NSThread sleepForTimeInterval:1.2];
     }
 
     if (!respDict) {
-        NSString *rawStr = [[NSString alloc] initWithData:respData encoding:NSUTF8StringEncoding] ?: @"empty";
-        if (rawStr.length > 100) rawStr = [rawStr substringToIndex:100];
-        [[AuraSignEngine sharedEngine] appendTimelineLog:[NSString stringWithFormat:@"[QH65B2-HTML-ERR] %@ 未返回 Plist! exit=%d, raw=%@", actionPath, curlExit, rawStr] success:NO];
         if (outError) {
-            *outError = [NSError errorWithDomain:@"AuraSign" code:503 userInfo:@{NSLocalizedDescriptionKey: @"苹果开发者中心服务器繁忙 (503)，已为您缓存令牌，请再点一次重试"}];
+            *outError = [NSError errorWithDomain:@"AuraSign" code:httpStatus userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"苹果开发者中心返回 HTTP %ld，请复制诊断日志查看详情", (long)httpStatus]}];
         }
         return nil;
     }
@@ -918,10 +942,6 @@ static const char *kRFC5054_2048_N_Hex =
     NSInteger resultCode = [respDict[@"resultCode"] integerValue];
     NSString *rawResultStr = respDict[@"resultString"] ?: @"";
     NSString *rawUserStr   = respDict[@"userString"] ?: @"";
-    NSArray *teamsArr      = [respDict[@"teams"] isKindOfClass:[NSArray class]] ? respDict[@"teams"] : nil;
-    [[AuraSignEngine sharedEngine] appendTimelineLog:[NSString stringWithFormat:@"[QH65B2-RESP] %@ | resultCode=%ld | keys=%@ | teamsCount=%lu | msg=%@",
-        actionPath, (long)resultCode, [respDict.allKeys componentsJoinedByString:@","], (unsigned long)teamsArr.count, rawUserStr.length ? rawUserStr : rawResultStr] success:(resultCode == 0)];
-
     if (resultCode != 0 && outError) {
         NSString *appleMsg = rawUserStr.length ? rawUserStr : (rawResultStr.length ? rawResultStr : @"未知苹果接口错误");
         *outError = [NSError errorWithDomain:@"AuraApplePortal" code:resultCode userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"苹果返回 (%ld): %@", (long)resultCode, appleMsg]}];
