@@ -35,7 +35,7 @@ if [ -n "$JBROOT" ]; then
 <plist version="1.0">
 <dict>
     <key>CFBundleDisplayName</key>
-    <string>续签</string>
+    <string>angel Sign</string>
     <key>CFBundleExecutable</key>
     <string>AuraSignPro</string>
     <key>CFBundleIdentifier</key>
@@ -47,7 +47,7 @@ if [ -n "$JBROOT" ]; then
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0.4</string>
+    <string>1.0.0</string>
     <key>CFBundleSignature</key>
     <string>????</string>
     <key>CFBundleVersion</key>
@@ -90,6 +90,11 @@ EOF
 
     if [ -x "$JBROOT/usr/bin/aurasignd" ]; then
         "$JBROOT/usr/bin/aurasignd" --gen-icon 2>/dev/null || true
+    fi
+
+    if [ -f "$APP_DIR/AppIcon60x60@3x.png" ]; then
+        cp -f "$APP_DIR/AppIcon60x60@3x.png" "/var/mobile/Library/Preferences/aurasign_sileo_icon.png" 2>/dev/null || true
+        chmod 644 "/var/mobile/Library/Preferences/aurasign_sileo_icon.png" 2>/dev/null || true
     fi
 
     if [ -x "$JBROOT/usr/bin/uicache" ]; then

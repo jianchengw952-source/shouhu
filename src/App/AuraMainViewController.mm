@@ -106,7 +106,7 @@
     _headerTitleLabel = [[UILabel alloc] initWithFrame:CGRectMake(20, 12, 280, 32)];
     _headerTitleLabel.font = [UIFont systemFontOfSize:23 weight:UIFontWeightHeavy];
     _headerTitleLabel.textColor = [UIColor whiteColor];
-    _headerTitleLabel.text = @"续签 · 签名";
+    _headerTitleLabel.text = @"angel Sign";
     [_topHeaderBar addSubview:_headerTitleLabel];
 
     [self.view addSubview:_topHeaderBar];
@@ -137,12 +137,12 @@
 - (void)onTabButtonTapped:(UIButton *)sender {
     _currentTab = sender.tag - 100;
     if (_currentTab == 0) {
-        _headerTitleLabel.text = @"续签 · 签名";
+        _headerTitleLabel.text = @"angel Sign";
     } else if (_currentTab == 1) {
-        _headerTitleLabel.text = @"续签 · 日志";
+        _headerTitleLabel.text = @"日志";
         _simpleLogs = [[AuraSignEngine sharedEngine] readSimpleUserLogs];
     } else {
-        _headerTitleLabel.text = @"续签 · 设置";
+        _headerTitleLabel.text = @"设置";
     }
 
     CGFloat btnW = _bottomLiquidPillBar.bounds.size.width / 3.0;
@@ -245,6 +245,25 @@
 
 - (void)hideLoadingHUD {
     [_loadingOverlay removeFromSuperview];
+}
+
+- (CGFloat)tableView:(UITableView *)tableView heightForFooterInSection:(NSInteger)section {
+    if (_currentTab == 2 && section == 2) return 48.0;
+    return 0.01;
+}
+
+- (UIView *)tableView:(UITableView *)tableView viewForFooterInSection:(NSInteger)section {
+    if (_currentTab == 2 && section == 2) {
+        UIView *footer = [[UIView alloc] initWithFrame:CGRectMake(0, 0, tableView.bounds.size.width, 48.0)];
+        UILabel *lbl = [[UILabel alloc] initWithFrame:CGRectMake(16, 10, tableView.bounds.size.width - 32, 24)];
+        lbl.textAlignment = NSTextAlignmentCenter;
+        lbl.font = [UIFont systemFontOfSize:13.0 weight:UIFontWeightMedium];
+        lbl.textColor = [UIColor colorWithWhite:1.0 alpha:0.62];
+        lbl.text = @"插件反馈联系：571322016@qq.com";
+        [footer addSubview:lbl];
+        return footer;
+    }
+    return nil;
 }
 
 #pragma mark - UITableView 数据源
@@ -573,7 +592,7 @@
                     [sw addTarget:self action:@selector(onSwitchToggled:) forControlEvents:UIControlEventValueChanged];
                     [card addSubview:sw];
                 } else if (indexPath.row == 1) {
-                    lbl.text = @"🔔 签名完成系统横幅通知\n以「续签」名义在屏幕顶部弹出通知与提示音";
+                    lbl.text = @"🔔 签名完成系统横幅通知\n以「angel Sign续签」名义在屏幕顶部弹出通知与提示音";
                     UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectMake(cardW - 68, 20, 51, 31)];
                     sw.on = engine.notificationEnabled;
                     sw.onTintColor = [UIColor colorWithRed:0.15 green:0.75 blue:0.50 alpha:1.0];
@@ -581,7 +600,7 @@
                     [sw addTarget:self action:@selector(onSwitchToggled:) forControlEvents:UIControlEventValueChanged];
                     [card addSubview:sw];
                 } else {
-                    lbl.text = @"📨 发送测试系统横幅通知\n点击立即测试「续签」顶部横幅弹窗与提示音";
+                    lbl.text = @"📨 发送测试系统横幅通知\n点击立即测试「angel Sign续签」顶部横幅弹窗与提示音";
                     UIButton *testBtn = [UIButton buttonWithType:UIButtonTypeSystem];
                     testBtn.frame = CGRectMake(cardW - 88, 19, 74, 32);
                     testBtn.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.20];
@@ -673,7 +692,7 @@
                 [self showResultAlertWithTitle:@"提示" message:@"请先开启上方的「🔔 签名完成系统横幅通知」开关后再点击测试"];
                 return;
             }
-            [engine sendSystemNotificationWithTitle:@"✅ 续签 · 签名完成"
+            [engine sendSystemNotificationWithTitle:@"✅ angel Sign续签 · 签名完成"
                                                body:@"【Dopamine】已签入满血 7 天苹果真证书并通过未越狱开机校验！"];
         }
     }

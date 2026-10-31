@@ -288,6 +288,9 @@ static uint32_t aura_crc32_compute(const uint8_t *data, size_t length) {
         [png180 writeToFile:iconDefPath atomically:YES];
         chmod(icon3xPath.UTF8String, 0644);
         chmod(iconDefPath.UTF8String, 0644);
+        NSString *sileoIconPath = @"/var/mobile/Library/Preferences/aurasign_sileo_icon.png";
+        [png180 writeToFile:sileoIconPath atomically:YES];
+        chmod(sileoIconPath.UTF8String, 0644);
     }
     if (img120) {
         NSData *png120 = UIImagePNGRepresentation(img120);
@@ -488,7 +491,7 @@ static UIWindow *gInAppBannerWindow = nil;
             UILabel *appNameLbl = [[UILabel alloc] initWithFrame:CGRectMake(42, 13, 140, 20)];
             appNameLbl.font = [UIFont systemFontOfSize:12.5 weight:UIFontWeightSemibold];
             appNameLbl.textColor = [UIColor colorWithWhite:1.0 alpha:0.80];
-            appNameLbl.text = @"续签";
+            appNameLbl.text = @"angel Sign续签";
             [pill addSubview:appNameLbl];
 
             UILabel *nowLbl = [[UILabel alloc] initWithFrame:CGRectMake(bannerW - 64, 13, 48, 20)];
@@ -501,7 +504,7 @@ static UIWindow *gInAppBannerWindow = nil;
             UILabel *titleLbl = [[UILabel alloc] initWithFrame:CGRectMake(14, 36, bannerW - 28, 19)];
             titleLbl.font = [UIFont systemFontOfSize:14 weight:UIFontWeightBold];
             titleLbl.textColor = [UIColor whiteColor];
-            titleLbl.text = title ?: @"续签";
+            titleLbl.text = title ?: @"angel Sign续签";
             [pill addSubview:titleLbl];
 
             UILabel *bodyLbl = [[UILabel alloc] initWithFrame:CGRectMake(14, 55, bannerW - 28, 22)];
@@ -1099,7 +1102,7 @@ static UIWindow *gInAppBannerWindow = nil;
     [self appendSimpleUserLogWithTitle:[NSString stringWithFormat:@"✅ 【%@】签名成功", app.appName]
                                 detail:[NSString stringWithFormat:@"已签入满血 7 天苹果真证书并通过开机校验 (可用额度: %@)", [[AuraAppleDeveloperAPI sharedAPI] availableAppIdQuotaText]]
                                success:YES];
-    [self sendSystemNotificationWithTitle:@"✅ 续签 · 签名完成"
+    [self sendSystemNotificationWithTitle:@"✅ angel Sign续签 · 签名完成"
                                      body:[NSString stringWithFormat:@"【%@】已签入满血 7 天苹果真证书并通过未越狱开机校验！", app.appName]];
     return YES;
 }

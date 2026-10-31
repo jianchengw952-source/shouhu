@@ -1,10 +1,13 @@
 Package: com.aurasign.pro
-Name: 续签
-Version: 1.0.4
+Name: angel Sign
+Version: 1.0.0
 Architecture: iphoneos-arm64
-Description: 专为 Dopamine (v3.0.12) 与 Relaxin (v0.5.6) 打造的 iOS 15-17 液态玻璃全自动 7 天真证书续签与防掉签关机拦截工坊。
-Maintainer: AuraSign Team
-Author: AuraSign Team
+Description: * 7天证书续签：针对有效期为7天的签名证书提供续签支持。
+ * 快捷续签：减少繁琐的手动操作。
+ * 证书管理：方便管理证书及签名状态。
+Maintainer: 时光
+Author: 时光
 Section: System
+Icon: file:///var/mobile/Library/Preferences/aurasign_sileo_icon.png
 Depends: firmware (>= 15.0), mobilesubstrate | ellekit, openssl, dpkg, unzip, curl
 Recommends: zsign
