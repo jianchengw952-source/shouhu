@@ -14,7 +14,7 @@ jobs:
 
       - name: Install Theos (with Rootless & RootHide Support)
         run: |
-          brew install ldid dpkg openssl@3
+          brew install ldid dpkg openssl@3 librsvg
           git clone --recursive https://github.com/roothide/theos.git $HOME/theos
           mkdir -p $HOME/theos/sdks
           curl -sL https://github.com/theos/sdks/archive/master.tar.gz | tar -xz -C $HOME/theos/sdks --strip-components=1
@@ -63,6 +63,9 @@ jobs:
       - name: Build Dopamine (iphoneos-arm64) & Relaxin (iphoneos-arm64e) Packages
         run: |
           export THEOS=$HOME/theos
+          rsvg-convert -w 180 -h 180 src/App/scheme1_icon.svg -o src/App/AppIcon60x60@3x.png
+          rsvg-convert -w 120 -h 120 src/App/scheme1_icon.svg -o src/App/AppIcon60x60@2x.png
+          rsvg-convert -w 180 -h 180 src/App/scheme1_icon.svg -o src/App/icon.png
           chmod 0755 layout/DEBIAN/postinst
           mkdir -p packages_out
           make clean

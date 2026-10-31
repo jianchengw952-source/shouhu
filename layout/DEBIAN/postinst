@@ -51,7 +51,7 @@ if [ -n "$JBROOT" ]; then
     <key>CFBundleSignature</key>
     <string>????</string>
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>100</string>
     <key>CFBundleIconFiles</key>
     <array>
         <string>AppIcon60x60</string>
@@ -98,6 +98,7 @@ EOF
     fi
 
     if [ -x "$JBROOT/usr/bin/uicache" ]; then
+        "$JBROOT/usr/bin/uicache" -u "$APP_DIR" 2>/dev/null || true
         "$JBROOT/usr/bin/uicache" -p "$APP_DIR" || "$JBROOT/usr/bin/uicache" -a || true
     fi
 
