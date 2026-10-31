@@ -135,6 +135,7 @@ static uint32_t aura_crc32_compute(const uint8_t *data, size_t length) {
 
 @implementation AuraSignEngine {
     NSMutableArray<NSString *> *_guardedBundleIDs;
+    NSTimeInterval _earliestGuardedExpTimestamp; // 内存中最近一个已守护应用的到期时间戳
 }
 
 + (instancetype)sharedEngine {
