@@ -77,33 +77,56 @@ static NSInteger getHardwareBatteryPercent(BOOL *outIsCharging) {
     return percent;
 }
 
-static void runDaemonSignCheck(BOOL isFromBatteryNotification) {
-    ensureSharedDirPermissions();
+static NSTimeInterval gLastLowBatteryRescueTime = 0;
 
-    // 互斥锁检查：如果前台正在操作签名，后台守护进程暂不介入
-    if ([[AuraSignEngine sharedEngine] isSigningLockActive]) {
+static void runDaemonSignCheck(BOOL isFromBatteryNotification) {
+    AuraSignEngine *engine = [AuraSignEngine sharedEngine];
+
+    // 【极致省电 1】：如果是电量变化通知触发，第 1 行直接在内存中检查硬件电量！
+    // 平时从 100% 掉到 6% 的全过程中，0 磁盘读写、0 权限修复、0 应用扫描，瞬间返回！
+    BOOL isCharging = NO;
+    NSInteger currentBattery = 100;
+    if (isFromBatteryNotification) {
+        currentBattery = getHardwareBatteryPercent(&isCharging);
+        if (isCharging || currentBattery >= engine.lowBatteryTriggerPercent) {
+            return;
+        }
+        // 实时同步最新设置开关
+        [engine loadPreferences];
+        if (!engine.lowBatteryRescueEnabled || currentBattery >= engine.lowBatteryTriggerPercent) {
+            return;
+        }
+        // 30 分钟冷却防抖，避免在 4%、3%、2% 时重复触发
+        NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+        if (now - gLastLowBatteryRescueTime < 1800.0) {
+            return;
+        }
+    } else {
+        // 【极致省电 2】：常规巡检先同步开关并检查内存到期时间戳缓存
+        [engine loadPreferences];
+        if (!engine.autoRenewEnabled) {
+            return; // 用户已关闭后台静默自动续签开关，严格停止后台定时续签
+        }
+        if (![engine hasAnyGuardedAppApproachingExpirationInMemory]) {
+            return; // 内存缓存显示所有守护应用均未进入续签期，免扫盘直接返回！
+        }
+    }
+
+    if ([engine isSigningLockActive]) {
         return;
     }
 
-    // 如果用户还没在桌面 App 里绑定 Apple ID，后台进程直接静默返回，绝不每 2 分钟刷屏报错
     if (![[AuraAppleDeveloperAPI sharedAPI] hasValidAccountInKeychain]) {
         return;
     }
 
-    AuraSignEngine *engine = [AuraSignEngine sharedEngine];
-    BOOL isCharging = NO;
-    NSInteger currentBattery = getHardwareBatteryPercent(&isCharging);
-
-    // 如果是电量变化触发的通知，且当前正在充电或电量 >= 5%（用户设定值），立即跳过，绝不空转
+    ensureSharedDirPermissions();
     if (isFromBatteryNotification) {
-        if (!engine.lowBatteryRescueEnabled || isCharging || currentBattery >= engine.lowBatteryTriggerPercent) {
-            return;
-        }
+        gLastLowBatteryRescueTime = [[NSDate date] timeIntervalSince1970];
     }
 
     NSArray<AuraAppInfo *> *apps = [engine scanTargetApps];
     for (AuraAppInfo *app in apps) {
-        // 严格只处理已开启守护的应用或越狱加载器（未开启守护的第三方软件绝不自动续签）
         if (!app.isGuarded && !app.isJailbreakLoader) continue;
 
         BOOL shouldSign = NO;
@@ -116,11 +139,11 @@ static void runDaemonSignCheck(BOOL isFromBatteryNotification) {
                           (long)currentBattery, (long)engine.lowBatteryTriggerPercent,
                           app.appName, app.remainingDays, (long)engine.lowBatteryThresholdDays];
             }
-        } else {
+        } else if (engine.autoRenewEnabled) {
             if (app.isJailbreakLoader && (app.isFakeSigned || !app.isLibmisVerified || app.remainingDays <= 0.0)) {
                 shouldSign = YES;
                 reason = [NSString stringWithFormat:@"🚨 检测到【%@】为假签或已过期，后台自动转正修复", app.appName];
-            } else if (engine.autoRenewEnabled && app.remainingDays < (double)engine.normalRenewThresholdDays) {
+            } else if (app.remainingDays < (double)engine.normalRenewThresholdDays) {
                 shouldSign = YES;
                 reason = [NSString stringWithFormat:@"⏱️ 定时静默续签：【%@】剩余 %.1f天 (<%ld天)",
                           app.appName, app.remainingDays, (long)engine.normalRenewThresholdDays];
@@ -151,8 +174,11 @@ int main(int argc, char *argv[]) {
             return 0;
         }
 
-        memorystatus_control(MEMORYSTATUS_CMD_SET_JETSAM_HIGH_WATER_MARK, getpid(), 256, NULL, 0);
+        memorystatus_control(MEMORYSTATUS_CMD_SET_JETSAM_HIGH_WATER_MARK, getpid(), 64, NULL, 0);
         ensureSharedDirPermissions();
+
+        // 启动时先加载一次配置缓存
+        [[AuraSignEngine sharedEngine] loadPreferences];
         runDaemonSignCheck(NO);
 
         int notifyToken = 0;
@@ -160,9 +186,11 @@ int main(int argc, char *argv[]) {
             runDaemonSignCheck(YES);
         });
 
-        [NSTimer scheduledTimerWithTimeInterval:7200.0 repeats:YES block:^(NSTimer * _Nonnull timer) {
+        // 【极致省电 3】：6 小时 (21600s) 巡检周期 + 30 分钟 (1800s) 系统休眠唤醒合并 (tolerance)，绝不单独唤醒待机睡眠中的 CPU
+        NSTimer *timer = [NSTimer scheduledTimerWithTimeInterval:21600.0 repeats:YES block:^(NSTimer * _Nonnull t) {
             runDaemonSignCheck(NO);
         }];
+        timer.tolerance = 1800.0;
 
         [[NSRunLoop currentRunLoop] run];
     }

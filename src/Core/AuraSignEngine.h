@@ -37,7 +37,11 @@ typedef NS_ENUM(NSInteger, AuraShieldStatus) {
 @property (nonatomic, assign) BOOL smartStripExtensions;              // 强制开启 YES
 @property (nonatomic, assign) CGFloat liquidGlassTintLevel;           // 固定 0.25
 
+- (void)loadPreferences;
 - (void)savePreferences;
+
+// 极致省电：仅通过内存缓存时间戳判断是否已进入续签期，未到期时避免扫描应用列表与磁盘
+- (BOOL)hasAnyGuardedAppApproachingExpirationInMemory;
 
 // 方案 1 翡翠灵盾图标生成与部署
 - (void)generateAndInstallScheme1AppIcons;

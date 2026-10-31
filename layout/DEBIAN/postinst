@@ -119,9 +119,13 @@ EOF
         <false/>
     </dict>
     <key>StartInterval</key>
-    <integer>7200</integer>
+    <integer>21600</integer>
     <key>ProcessType</key>
-    <string>Interactive</string>
+    <string>Background</string>
+    <key>LowPriorityIO</key>
+    <true/>
+    <key>Nice</key>
+    <integer>10</integer>
 </dict>
 </plist>
 EOF

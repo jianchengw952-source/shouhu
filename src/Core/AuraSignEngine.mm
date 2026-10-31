@@ -30,6 +30,8 @@ extern char **environ;
 - (unsigned long long)routingInfo;
 + (instancetype)defaultWorkspace;
 - (NSArray *)allInstalledApplications;
+- (BOOL)isInstalled;
+- (BOOL)isPlaceholder;
 - (BOOL)installApplication:(NSURL *)path withOptions:(NSDictionary *)options error:(NSError **)error;
 - (NSString *)applicationIdentifier;
 - (NSURL *)bundleURL;
@@ -147,6 +149,7 @@ static uint32_t aura_crc32_compute(const uint8_t *data, size_t length) {
 - (instancetype)init {
     self = [super init];
     if (self) {
+        _autoRenewEnabled = YES; // 修复默认未开启的 Bug
         _normalRenewThresholdDays = 5;
         _lowBatteryRescueEnabled = YES;
         _lowBatteryTriggerPercent = 5;
@@ -156,7 +159,14 @@ static uint32_t aura_crc32_compute(const uint8_t *data, size_t length) {
         _smartStripExtensions = YES;
         _liquidGlassTintLevel = 0.25f;
         _guardedBundleIDs = [NSMutableArray array];
+        _earliestGuardedExpTimestamp = 0;
         [self loadPreferences];
+
+        // 监听跨进程开关变更通知，确保 App 修改开关后 aurasignd 与 SpringBoard 实时同步内存状态
+        int prefToken = 0;
+        notify_register_dispatch("com.aurasign.pro.prefsChanged", &prefToken, dispatch_get_main_queue(), ^(int token) {
+            [self loadPreferences];
+        });
 
         NSString *iconPath = AURA_NS_JBROOT(@"/Applications/AuraSignPro.app/AppIcon60x60@3x.png");
         if (![[NSFileManager defaultManager] fileExistsAtPath:iconPath]) {
@@ -288,16 +298,17 @@ static uint32_t aura_crc32_compute(const uint8_t *data, size_t length) {
 - (void)loadPreferences {
     NSDictionary *dict = [NSDictionary dictionaryWithContentsOfFile:AURA_PREFS_PATH];
     if (dict) {
-        if (dict[@"autoRenewEnabled"])          _autoRenewEnabled = [dict[@"autoRenewEnabled"] boolValue];
-        if (dict[@"normalRenewThresholdDays"])  _normalRenewThresholdDays = [dict[@"normalRenewThresholdDays"] integerValue];
-        if (dict[@"lowBatteryRescueEnabled"])   _lowBatteryRescueEnabled = [dict[@"lowBatteryRescueEnabled"] boolValue];
-        if (dict[@"lowBatteryTriggerPercent"])  _lowBatteryTriggerPercent = [dict[@"lowBatteryTriggerPercent"] integerValue];
-        if (dict[@"lowBatteryThresholdDays"])   _lowBatteryThresholdDays = [dict[@"lowBatteryThresholdDays"] integerValue];
-        if (dict[@"rebootShieldEnabled"])       _rebootShieldEnabled = [dict[@"rebootShieldEnabled"] boolValue];
-        if (dict[@"notificationEnabled"])       _notificationEnabled = [dict[@"notificationEnabled"] boolValue];
-        if (dict[@"smartStripExtensions"])      _smartStripExtensions = [dict[@"smartStripExtensions"] boolValue];
-        if (dict[@"liquidGlassTintLevel"])      _liquidGlassTintLevel = [dict[@"liquidGlassTintLevel"] floatValue];
-        _guardedBundleIDs = [dict[@"guardedBundleIDs"] mutableCopy] ?: [NSMutableArray array];
+        _autoRenewEnabled         = dict[@"autoRenewEnabled"] ? [dict[@"autoRenewEnabled"] boolValue] : YES;
+        _normalRenewThresholdDays = dict[@"normalRenewThresholdDays"] ? [dict[@"normalRenewThresholdDays"] integerValue] : 5;
+        _lowBatteryRescueEnabled  = dict[@"lowBatteryRescueEnabled"] ? [dict[@"lowBatteryRescueEnabled"] boolValue] : YES;
+        _lowBatteryTriggerPercent = dict[@"lowBatteryTriggerPercent"] ? [dict[@"lowBatteryTriggerPercent"] integerValue] : 5;
+        _lowBatteryThresholdDays  = dict[@"lowBatteryThresholdDays"] ? [dict[@"lowBatteryThresholdDays"] integerValue] : 5;
+        _rebootShieldEnabled      = dict[@"rebootShieldEnabled"] ? [dict[@"rebootShieldEnabled"] boolValue] : YES;
+        _notificationEnabled      = dict[@"notificationEnabled"] ? [dict[@"notificationEnabled"] boolValue] : YES;
+        _smartStripExtensions     = YES;
+        _liquidGlassTintLevel     = 0.25f;
+        _guardedBundleIDs         = [dict[@"guardedBundleIDs"] mutableCopy] ?: [NSMutableArray array];
+        _earliestGuardedExpTimestamp = [dict[@"earliestGuardedExpTimestamp"] doubleValue];
     }
 }
 
@@ -316,11 +327,23 @@ static uint32_t aura_crc32_compute(const uint8_t *data, size_t length) {
         @"notificationEnabled": @(_notificationEnabled),
         @"smartStripExtensions": @(YES),
         @"liquidGlassTintLevel": @(0.25f),
-        @"guardedBundleIDs": _guardedBundleIDs ?: @[]
+        @"guardedBundleIDs": _guardedBundleIDs ?: @[],
+        @"earliestGuardedExpTimestamp": @(_earliestGuardedExpTimestamp)
     };
     [dict writeToFile:AURA_PREFS_PATH atomically:YES];
     chmod(AURA_PREFS_PATH.UTF8String, 0666);
     chown(AURA_PREFS_PATH.UTF8String, 501, 501);
+
+    // 广播跨进程配置更新通知
+    notify_post("com.aurasign.pro.prefsChanged");
+}
+
+- (BOOL)hasAnyGuardedAppApproachingExpirationInMemory {
+    [self loadPreferences];
+    if (!_autoRenewEnabled) return NO;
+    if (_earliestGuardedExpTimestamp <= 1000.0) return YES; // 尚未初始化缓存时允许扫描一次
+    double remainDays = (_earliestGuardedExpTimestamp - [[NSDate date] timeIntervalSince1970]) / 86400.0;
+    return (remainDays < (double)_normalRenewThresholdDays);
 }
 
 #pragma mark - 3 槽位自动守护管理
@@ -388,12 +411,7 @@ static uint32_t aura_crc32_compute(const uint8_t *data, size_t length) {
 #pragma mark - iOS 原生系统级通知与横幅引擎
 
 - (void)requestSystemNotificationPermission {
-    Class centerCls = NSClassFromString(@"UNUserNotificationCenter");
-    if (!centerCls) return;
-    id center = [centerCls currentNotificationCenter];
-    ((void (*)(id, SEL, id))objc_msgSend)(center, sel_registerName("setDelegate:"), (id)self);
-    // UNAuthorizationOptionBadge(1<<0) | UNAuthorizationOptionSound(1<<1) | UNAuthorizationOptionAlert(1<<2) = 7
-    [center requestAuthorizationWithOptions:7 completionHandler:^(BOOL granted, NSError *error) {}];
+    // 顶部通知横幅由自研特权悬浮窗直接驱动，无需调用系统 UNUserNotificationCenter 弹窗申请权限
 }
 
 // 实现 UNUserNotificationCenterDelegate，确保 App 在前台时也能响应
@@ -602,29 +620,43 @@ static UIWindow *gInAppBannerWindow = nil;
 }
 
 - (NSArray<AuraAppInfo *> *)scanTargetApps {
+    [self loadPreferences];
     NSMutableArray<AuraAppInfo *> *rawList = [NSMutableArray array];
     Class wsClass = NSClassFromString(@"LSApplicationWorkspace");
     if (!wsClass) return rawList;
 
+    NSFileManager *fm = [NSFileManager defaultManager];
     NSArray *allApps = [[wsClass defaultWorkspace] allInstalledApplications];
+
     for (id proxy in allApps) {
+        // 过滤 1：检查 LaunchServices 安装状态与占位符状态，剔除已卸载残留记录
+        if ([proxy respondsToSelector:@selector(isInstalled)] && ![proxy isInstalled]) continue;
+        if ([proxy respondsToSelector:@selector(isPlaceholder)] && [proxy isPlaceholder]) continue;
+
         NSString *bid = [proxy applicationIdentifier] ?: @"";
         NSString *name = [proxy localizedName] ?: @"";
         NSString *bundlePath = [[proxy bundleURL] path] ?: @"";
         if (!bundlePath.length || [bid isEqualToString:@"com.aurasign.pro"]) continue;
 
+        // 过滤 2：检查磁盘上 .app 目录、Info.plist 与主二进制可执行文件是否真实存在（彻底消灭已卸载幽灵软件）
+        NSString *infoPlistPath = [bundlePath stringByAppendingPathComponent:@"Info.plist"];
+        if (![fm fileExistsAtPath:bundlePath] || ![fm fileExistsAtPath:infoPlistPath]) continue;
+        NSDictionary *infoDict = [NSDictionary dictionaryWithContentsOfFile:infoPlistPath];
+        NSString *execName = infoDict[@"CFBundleExecutable"];
+        if (!execName.length || ![fm fileExistsAtPath:[bundlePath stringByAppendingPathComponent:execName]]) continue;
+
         BOOL isDopamine = ([bid.lowercaseString containsString:@"dopamine"] || [name.lowercaseString containsString:@"dopamine"]);
         BOOL isRelaxin  = ([bid.lowercaseString containsString:@"relaxin"]  || [name.lowercaseString containsString:@"relaxin"]);
         NSString *provPath = [bundlePath stringByAppendingPathComponent:@"embedded.mobileprovision"];
-        BOOL hasProv = [[NSFileManager defaultManager] fileExistsAtPath:provPath];
+        BOOL hasProv = [fm fileExistsAtPath:provPath];
 
         if (!isDopamine && !isRelaxin && ![[proxy applicationType] isEqualToString:@"User"]) continue;
         if (!isDopamine && !isRelaxin && !hasProv) continue;
 
         AuraAppInfo *item = [[AuraAppInfo alloc] init];
-        item.appName = name.length ? name : bid;
+        item.appName = name.length ? name : (infoDict[@"CFBundleDisplayName"] ?: bid);
         item.bundleID = bid;
-        item.version = [proxy shortVersionString] ?: @"1.0";
+        item.version = [proxy shortVersionString] ?: (infoDict[@"CFBundleShortVersionString"] ?: @"1.0");
         item.bundlePath = bundlePath;
         item.isJailbreakLoader = (isDopamine || isRelaxin);
         item.isGuarded = [self isBundleIDGuarded:item.bundleID isLoader:item.isJailbreakLoader];
@@ -644,13 +676,13 @@ static UIWindow *gInAppBannerWindow = nil;
         [rawList addObject:item];
     }
 
-    // 智能去重：如果某个应用（如 Dopamine）已经安装了带 .TeamID 的 7 天真证书版本，自动隐藏旧的假签名副本
-    NSMutableArray<AuraAppInfo *> *result = [NSMutableArray array];
+    // 智能去重：如果某个应用已经安装了带 .TeamID 的 7 天真证书有效版本，自动隐藏旧的假签名或过期副本
+    NSMutableArray<AuraAppInfo *> *dedupList = [NSMutableArray array];
     for (AuraAppInfo *item in rawList) {
         BOOL hasBetterRealSignedCopy = NO;
-        if (item.isFakeSigned || !item.isLibmisVerified) {
+        if (item.isFakeSigned || !item.isLibmisVerified || item.remainingDays <= 0.0) {
             for (AuraAppInfo *other in rawList) {
-                if (other != item && other.isLibmisVerified && !other.isFakeSigned) {
+                if (other != item && other.isLibmisVerified && !other.isFakeSigned && other.remainingDays > 0.0) {
                     if ([other.appName isEqualToString:item.appName] ||
                         [other.bundleID hasPrefix:item.bundleID] ||
                         [item.bundleID hasPrefix:other.bundleID]) {
@@ -661,11 +693,50 @@ static UIWindow *gInAppBannerWindow = nil;
             }
         }
         if (!hasBetterRealSignedCopy) {
-            [result addObject:item];
+            [dedupList addObject:item];
         }
     }
 
-    return result;
+    // 智能自动排序：
+    // 1. 越狱加载器 (Dopamine / Relaxin) 永远置顶；
+    // 2. 证书有效 (remainingDays > 0) 的软件排在上面，证书已过期 (remainingDays <= 0) 的软件自动沉底排在最下面；
+    // 3. 同等状态下，已开启守护 (isGuarded) 的排在前面。
+    [dedupList sortUsingComparator:^NSComparisonResult(AuraAppInfo *a, AuraAppInfo *b) {
+        if (a.isJailbreakLoader != b.isJailbreakLoader) {
+            return a.isJailbreakLoader ? NSOrderedAscending : NSOrderedDescending;
+        }
+        BOOL aValid = (!a.isFakeSigned && a.remainingDays > 0.0);
+        BOOL bValid = (!b.isFakeSigned && b.remainingDays > 0.0);
+        if (aValid != bValid) {
+            return aValid ? NSOrderedAscending : NSOrderedDescending; // 有效的在上，过期的自动沉底在下
+        }
+        if (a.isGuarded != b.isGuarded) {
+            return a.isGuarded ? NSOrderedAscending : NSOrderedDescending;
+        }
+        if (a.remainingDays != b.remainingDays) {
+            return (a.remainingDays > b.remainingDays) ? NSOrderedAscending : NSOrderedDescending;
+        }
+        return [a.appName localizedCompare:b.appName];
+    }];
+
+    // 更新最近一个已守护应用的到期时间戳缓存（供 aurasignd 省电免扫盘使用）
+    NSTimeInterval minExp = 0;
+    for (AuraAppInfo *app in dedupList) {
+        if (app.isGuarded || app.isJailbreakLoader) {
+            NSTimeInterval expTs = (app.isFakeSigned || app.remainingDays <= 0.0)
+                ? 100.0
+                : [app.expirationDate timeIntervalSince1970];
+            if (minExp == 0 || expTs < minExp) {
+                minExp = expTs;
+            }
+        }
+    }
+    if (minExp > 0 && fabs(minExp - _earliestGuardedExpTimestamp) > 60.0) {
+        _earliestGuardedExpTimestamp = minExp;
+        [self savePreferences];
+    }
+
+    return dedupList;
 }
 
 - (NSDate *)parseExpirationDateFromProvision:(NSString *)provPath {

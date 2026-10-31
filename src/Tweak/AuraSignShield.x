@@ -105,6 +105,7 @@ static void AuraShowNativeBannerInSpringBoard(NSString *title, NSString *body) {
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
     AuraSignEngine *engine = [AuraSignEngine sharedEngine];
+    [engine loadPreferences];
     if (!engine.rebootShieldEnabled) return;
 
     NSString *summary = nil;

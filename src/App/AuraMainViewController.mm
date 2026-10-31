@@ -668,10 +668,13 @@
         } else if (indexPath.section == 1 && indexPath.row == 3) {
             [self onConfigureLowBatteryRuleTapped];
         } else if (indexPath.section == 2 && indexPath.row == 2) {
-            [AuraSignEngine sharedEngine].notificationEnabled = YES;
-            [[AuraSignEngine sharedEngine] savePreferences];
-            [[AuraSignEngine sharedEngine] sendSystemNotificationWithTitle:@"✅ 续签 · 签名完成"
-                                                                      body:@"【Dopamine】已签入满血 7 天苹果真证书并通过未越狱开机校验！"];
+            AuraSignEngine *engine = [AuraSignEngine sharedEngine];
+            if (!engine.notificationEnabled) {
+                [self showResultAlertWithTitle:@"提示" message:@"请先开启上方的「🔔 签名完成系统横幅通知」开关后再点击测试"];
+                return;
+            }
+            [engine sendSystemNotificationWithTitle:@"✅ 续签 · 签名完成"
+                                               body:@"【Dopamine】已签入满血 7 天苹果真证书并通过未越狱开机校验！"];
         }
     }
 }
